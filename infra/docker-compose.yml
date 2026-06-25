@@ -1,0 +1,51 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ai-dev-platform-db
+    environment:
+      POSTGRES_USER: aidev
+      POSTGRES_PASSWORD: aidev_local
+      POSTGRES_DB: ai_dev_platform
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aidev -d ai_dev_platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: ai-dev-platform-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  api:
+    build:
+      context: ../apps/api
+      dockerfile: Dockerfile
+    container_name: ai-dev-platform-api
+    environment:
+      DATABASE_URL: postgresql://aidev:aidev_local@postgres:5432/ai_dev_platform
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: dev-secret-change-in-production
+      WEB_BASE_URL: http://localhost:5180
+      API_PUBLIC_URL: http://localhost:8000
+      TEAMS_MOCK_MODE: "false"
+      TEAMS_TENANT_ID: ${TEAMS_TENANT_ID:-common}
+      TEAMS_CLIENT_ID: ${TEAMS_CLIENT_ID:-}
+      TEAMS_CLIENT_SECRET: ${TEAMS_CLIENT_SECRET:-}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:

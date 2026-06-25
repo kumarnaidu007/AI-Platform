@@ -1,0 +1,2 @@
+-- Apply to existing database:
+-- Get-Content infra/db/init/02_platform_layer.sql | docker exec -i ai-dev-platform-db psql -U aidev -d ai_dev_platform
