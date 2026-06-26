@@ -8,12 +8,12 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from models.base import Base, TimestampMixin
 
 
-class CompanyIntegrationConnection(Base, TimestampMixin):
-    __tablename__ = "company_integration_connections"
-    __table_args__ = (UniqueConstraint("company_id", "platform_integration_id"),)
+class WorkspaceIntegrationConnection(Base, TimestampMixin):
+    __tablename__ = "workspace_integration_connections"
+    __table_args__ = (UniqueConstraint("workspace_id", "platform_integration_id"),)
 
     id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    company_id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("companies.id", ondelete="CASCADE"))
+    workspace_id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"))
     platform_integration_id: Mapped[UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("platform_integrations.id", ondelete="CASCADE")
     )
@@ -37,7 +37,7 @@ class CompanyIntegrationConnection(Base, TimestampMixin):
 class MemberIntegrationAccess(Base):
     __tablename__ = "member_integration_access"
 
-    company_id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("companies.id", ondelete="CASCADE"), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
     user_id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
     platform_integration_id: Mapped[UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("platform_integrations.id", ondelete="CASCADE"), primary_key=True
@@ -51,10 +51,10 @@ class MemberIntegrationAccess(Base):
 
 class MemberIntegrationConnection(Base, TimestampMixin):
     __tablename__ = "member_integration_connections"
-    __table_args__ = (UniqueConstraint("company_id", "user_id", "platform_integration_id"),)
+    __table_args__ = (UniqueConstraint("workspace_id", "user_id", "platform_integration_id"),)
 
     id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    company_id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("companies.id", ondelete="CASCADE"))
+    workspace_id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"))
     user_id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"))
     platform_integration_id: Mapped[UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("platform_integrations.id", ondelete="CASCADE")

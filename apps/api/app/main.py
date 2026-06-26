@@ -3,18 +3,16 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import admin, auth, company, oauth, teams
+from app.routers import admin, admin_agents, auth, github, jira, oauth, pipeline, workspace, workspace_agents
 from db.session import SessionLocal, check_db_connection
-from services.seed import ensure_super_admin
-from services.teams_platform import ensure_teams_platform_config
+from services.seed import bootstrap_platform
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db = SessionLocal()
     try:
-        ensure_super_admin(db)
-        ensure_teams_platform_config(db)
+        bootstrap_platform(db)
     finally:
         db.close()
     yield
@@ -22,7 +20,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AI Dev Platform API",
-    description="Multi-tenant AI development automation platform",
+    description="AI development automation platform",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -42,8 +40,12 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(admin.router)
-app.include_router(company.router)
-app.include_router(teams.router)
+app.include_router(admin_agents.router)
+app.include_router(workspace.router)
+app.include_router(workspace_agents.router)
+app.include_router(pipeline.router)
+app.include_router(github.router)
+app.include_router(jira.router)
 app.include_router(oauth.router)
 
 

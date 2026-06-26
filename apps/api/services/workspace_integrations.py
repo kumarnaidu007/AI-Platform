@@ -3,20 +3,20 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from models.company_portal import CompanyIntegrationConnection
+from models.workspace_portal import WorkspaceIntegrationConnection
 from models.platform import PlatformIntegration
 from services.platform_helpers import split_config_fields
 from services.secrets import decrypt_secrets, encrypt_secrets
 
 
 def get_company_connection(
-    db: Session, company_id, platform_integration_id
-) -> CompanyIntegrationConnection | None:
+    db: Session, workspace_id, platform_integration_id
+) -> WorkspaceIntegrationConnection | None:
     return (
-        db.query(CompanyIntegrationConnection)
+        db.query(WorkspaceIntegrationConnection)
         .filter(
-            CompanyIntegrationConnection.company_id == company_id,
-            CompanyIntegrationConnection.platform_integration_id == platform_integration_id,
+            WorkspaceIntegrationConnection.workspace_id == workspace_id,
+            WorkspaceIntegrationConnection.platform_integration_id == platform_integration_id,
         )
         .first()
     )
@@ -24,7 +24,7 @@ def get_company_connection(
 
 def company_integration_to_dict(
     integration: PlatformIntegration,
-    conn: CompanyIntegrationConnection | None,
+    conn: WorkspaceIntegrationConnection | None,
     *,
     is_granted: bool,
 ) -> dict[str, Any]:
@@ -51,17 +51,17 @@ def company_integration_to_dict(
 
 def save_company_connection(
     db: Session,
-    company_id,
+    workspace_id,
     integration: PlatformIntegration,
     user_id,
     connection_name: str,
     config: dict[str, Any],
-) -> CompanyIntegrationConnection:
+) -> WorkspaceIntegrationConnection:
     secrets, metadata = split_config_fields(integration, config)
-    conn = get_company_connection(db, company_id, integration.id)
+    conn = get_company_connection(db, workspace_id, integration.id)
     if not conn:
-        conn = CompanyIntegrationConnection(
-            company_id=company_id,
+        conn = WorkspaceIntegrationConnection(
+            workspace_id=workspace_id,
             platform_integration_id=integration.id,
             created_by_user_id=user_id,
         )

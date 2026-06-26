@@ -9,10 +9,9 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class CompanyLoginRequest(BaseModel):
+class WorkspaceLoginRequest(BaseModel):
     email: EmailStr
     password: str
-    company_slug: str
 
 
 class UserResponse(BaseModel):
@@ -26,7 +25,7 @@ class UserResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class CompanyContextResponse(BaseModel):
+class WorkspaceContextResponse(BaseModel):
     id: UUID
     name: str
     slug: str
@@ -41,13 +40,13 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     portal: str
     user: UserResponse
-    company: CompanyContextResponse | None = None
+    workspace: WorkspaceContextResponse | None = None
 
 
 class AuthMeResponse(BaseModel):
     portal: str
     user: UserResponse
-    company: CompanyContextResponse | None = None
+    workspace: WorkspaceContextResponse | None = None
 
 
 class LogoutResponse(BaseModel):

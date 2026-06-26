@@ -15,12 +15,12 @@ class CompanyDashboardResponse(BaseModel):
     team_count: int = 0
 
 
-class CompanySettingsResponse(BaseModel):
+class WorkspaceSettingsResponse(BaseModel):
     email_domain: str | None = None
     timezone: str = "UTC"
 
 
-class CompanySettingsUpdateRequest(BaseModel):
+class WorkspaceSettingsUpdateRequest(BaseModel):
     email_domain: str
 
 
@@ -66,7 +66,7 @@ class CompanyServiceItem(BaseModel):
     is_granted: bool
 
 
-class CompanyMemberResponse(BaseModel):
+class WorkspaceMemberResponse(BaseModel):
     id: UUID
     user_id: UUID
     email: str
@@ -74,17 +74,18 @@ class CompanyMemberResponse(BaseModel):
     role: str
     is_active: bool
     integrations_assigned: int = 0
+    agents_assigned: int = 0
     joined_at: datetime
 
 
-class CompanyMemberCreateRequest(BaseModel):
+class WorkspaceMemberCreateRequest(BaseModel):
     email: EmailStr
     full_name: str
     password: str
-    role: str = "member"
+    role: str = "team_member"
 
 
-class CompanyMemberUpdateRequest(BaseModel):
+class WorkspaceMemberUpdateRequest(BaseModel):
     role: str | None = None
     is_active: bool | None = None
 
@@ -166,6 +167,7 @@ class ProjectResponse(BaseModel):
     backend_stack: str | None = None
     db_type: str | None = None
     vcs_provider: str | None = None
+    repo_url: str | None = None
     pm_tool: str | None = None
     notification_channels: list[str] = Field(default_factory=list)
     monthly_token_budget_usd: float | None = None
@@ -184,6 +186,7 @@ class ProjectCreateRequest(BaseModel):
     backend_stack: str | None = None
     db_type: str | None = None
     vcs_provider: str | None = None
+    repo_url: str | None = None
     pm_tool: str | None = None
     notification_channels: list[str] = Field(default_factory=list)
     monthly_token_budget_usd: float | None = None
@@ -197,6 +200,7 @@ class ProjectUpdateRequest(BaseModel):
     backend_stack: str | None = None
     db_type: str | None = None
     vcs_provider: str | None = None
+    repo_url: str | None = None
     pm_tool: str | None = None
     notification_channels: list[str] | None = None
     monthly_token_budget_usd: float | None = None

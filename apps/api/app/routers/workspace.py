@@ -4,21 +4,22 @@ from fastapi import APIRouter, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
-from app.deps import CompanyAdminDep, CompanyAuthDep, CompanyWriterDep, DbDep
-from models import Company, CompanyMember, CompanySettings, PipelineRun, Project, User
-from models.company_portal import MemberIntegrationAccess
-from models.platform import CompanyPlatformIntegration, CompanyPlatformService, PlatformIntegration, PlatformService
-from schemas.company import (
+from app.deps import TeamLeadDep, WorkspaceAdminDep, WorkspaceAuthDep, WorkspaceWriterDep, DbDep
+from constants.roles import TEAM_LEAD, TEAM_MEMBER, VALID_MEMBER_ROLES
+from models import Workspace, WorkspaceMember, WorkspaceSettings, PipelineRun, Project, User
+from models.workspace_portal import MemberIntegrationAccess
+from models.platform import WorkspacePlatformIntegration, WorkspacePlatformService, PlatformIntegration, PlatformService
+from schemas.workspace import (
     CompanyDashboardResponse,
     CompanyIntegrationCatalogItem,
     CompanyIntegrationConnectRequest,
     CompanyIntegrationTestResponse,
-    CompanyMemberCreateRequest,
-    CompanyMemberResponse,
-    CompanyMemberUpdateRequest,
+    WorkspaceMemberCreateRequest,
+    WorkspaceMemberResponse,
+    WorkspaceMemberUpdateRequest,
     CompanyServiceItem,
-    CompanySettingsResponse,
-    CompanySettingsUpdateRequest,
+    WorkspaceSettingsResponse,
+    WorkspaceSettingsUpdateRequest,
     MemberIntegrationAccessItem,
     MemberIntegrationsAccessUpdate,
     MyIntegrationItem,
@@ -34,8 +35,8 @@ from schemas.company import (
     IntegrationStatusSummary,
 )
 from services.auth import hash_password, verify_password
-from services.company_access import set_company_email_domain
-from services.company_domain import email_matches_domain, normalize_domain
+from services.workspace_access import set_workspace_email_domain
+from services.workspace_domain import email_matches_domain, normalize_domain
 from services.member_integrations import (
     get_member_connection,
     member_integration_to_dict,
@@ -44,34 +45,34 @@ from services.member_integrations import (
 from services.platform_helpers import integration_is_assignable, service_is_assignable
 from services.secrets import decrypt_secrets
 
-router = APIRouter(prefix="/api/company", tags=["company"])
+router = APIRouter(prefix="/api/workspace", tags=["workspace"])
 
 
-def _get_company_settings(db: Session, company_id) -> CompanySettings | None:
-    return db.query(CompanySettings).filter(CompanySettings.company_id == company_id).first()
+def _get_workspace_settings(db: Session, workspace_id) -> WorkspaceSettings | None:
+    return db.query(WorkspaceSettings).filter(WorkspaceSettings.workspace_id == workspace_id).first()
 
 
-def _require_email_domain(db: Session, company_id) -> str:
-    settings = _get_company_settings(db, company_id)
+def _require_email_domain(db: Session, workspace_id) -> str:
+    settings = _get_workspace_settings(db, workspace_id)
     if not settings or not settings.email_domain:
-        raise HTTPException(400, "Configure your company email domain in Settings before adding employees")
+        raise HTTPException(400, "Configure your Workspace email domain in Settings before adding employees")
     return settings.email_domain
 
 
-def _granted_integration_ids(db: Session, company_id) -> set:
+def _granted_integration_ids(db: Session, workspace_id) -> set:
     rows = (
-        db.query(CompanyPlatformIntegration)
+        db.query(WorkspacePlatformIntegration)
         .filter(
-            CompanyPlatformIntegration.company_id == company_id,
-            CompanyPlatformIntegration.is_enabled.is_(True),
+            WorkspacePlatformIntegration.workspace_id == workspace_id,
+            WorkspacePlatformIntegration.is_enabled.is_(True),
         )
         .all()
     )
     return {r.platform_integration_id for r in rows}
 
 
-def _list_granted_integrations(db: Session, company_id) -> list[PlatformIntegration]:
-    granted = _granted_integration_ids(db, company_id)
+def _list_granted_integrations(db: Session, workspace_id) -> list[PlatformIntegration]:
+    granted = _granted_integration_ids(db, workspace_id)
     integrations = (
         db.query(PlatformIntegration)
         .options(joinedload(PlatformIntegration.connections))
@@ -81,11 +82,11 @@ def _list_granted_integrations(db: Session, company_id) -> list[PlatformIntegrat
     return [i for i in integrations if i.id in granted and integration_is_assignable(i)]
 
 
-def _assigned_integration_ids(db: Session, company_id, user_id) -> set:
+def _assigned_integration_ids(db: Session, workspace_id, user_id) -> set:
     rows = (
         db.query(MemberIntegrationAccess)
         .filter(
-            MemberIntegrationAccess.company_id == company_id,
+            MemberIntegrationAccess.workspace_id == workspace_id,
             MemberIntegrationAccess.user_id == user_id,
             MemberIntegrationAccess.is_enabled.is_(True),
         )
@@ -94,7 +95,7 @@ def _assigned_integration_ids(db: Session, company_id, user_id) -> set:
     return {r.platform_integration_id for r in rows}
 
 
-def _get_granted_integration(db: Session, company_id, key: str) -> PlatformIntegration:
+def _get_granted_integration(db: Session, workspace_id, key: str) -> PlatformIntegration:
     integration = (
         db.query(PlatformIntegration)
         .options(joinedload(PlatformIntegration.connections))
@@ -103,54 +104,54 @@ def _get_granted_integration(db: Session, company_id, key: str) -> PlatformInteg
     )
     if not integration:
         raise HTTPException(404, "Integration not found")
-    granted = _granted_integration_ids(db, company_id)
+    granted = _granted_integration_ids(db, workspace_id)
     if integration.id not in granted or not integration_is_assignable(integration):
-        raise HTTPException(403, "Integration not granted to your company")
+        raise HTTPException(403, "Integration not granted to your Workspace")
     return integration
 
 
-def _get_assigned_integration(db: Session, company_id, user_id, key: str) -> PlatformIntegration:
-    integration = _get_granted_integration(db, company_id, key)
-    assigned = _assigned_integration_ids(db, company_id, user_id)
+def _get_assigned_integration(db: Session, workspace_id, user_id, key: str) -> PlatformIntegration:
+    integration = _get_granted_integration(db, workspace_id, key)
+    assigned = _assigned_integration_ids(db, workspace_id, user_id)
     if integration.id not in assigned:
         raise HTTPException(403, "This integration has not been assigned to you")
     return integration
 
 
-@router.get("/settings", response_model=CompanySettingsResponse)
-def get_company_settings(ctx: CompanyAuthDep, db: DbDep):
-    settings = _get_company_settings(db, ctx.company_id)
-    return CompanySettingsResponse(
+@router.get("/settings", response_model=WorkspaceSettingsResponse)
+def get_workspace_settings(ctx : WorkspaceAuthDep, db: DbDep):
+    settings = _get_workspace_settings(db, ctx.workspace_id)
+    return WorkspaceSettingsResponse(
         email_domain=settings.email_domain if settings else None,
         timezone=settings.timezone if settings else "UTC",
     )
 
 
-@router.patch("/settings", response_model=CompanySettingsResponse)
-def update_company_settings(body: CompanySettingsUpdateRequest, ctx: CompanyAdminDep, db: DbDep):
-    company = db.query(Company).options(joinedload(Company.settings)).filter(Company.id == ctx.company_id).first()
-    if not company:
-        raise HTTPException(404, "Company not found")
+@router.patch("/settings", response_model=WorkspaceSettingsResponse)
+def update_workspace_settings(body: WorkspaceSettingsUpdateRequest, ctx : WorkspaceAdminDep, db: DbDep):
+    workspace = db.query(Workspace).options(joinedload(Workspace.settings)).filter(Workspace.id == ctx.workspace_id).first()
+    if not workspace:
+        raise HTTPException(404, "Workspace not found")
     try:
-        set_company_email_domain(db, company, body.email_domain)
+        set_workspace_email_domain(db, workspace, body.email_domain)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     db.commit()
-    settings = _get_company_settings(db, ctx.company_id)
-    return CompanySettingsResponse(
+    settings = _get_workspace_settings(db, ctx.workspace_id)
+    return WorkspaceSettingsResponse(
         email_domain=settings.email_domain if settings else None,
         timezone=settings.timezone if settings else "UTC",
     )
 
 
 @router.get("/dashboard", response_model=CompanyDashboardResponse)
-def company_dashboard(ctx: CompanyAuthDep, db: DbDep):
-    co = db.query(Company).options(joinedload(Company.settings)).filter(Company.id == ctx.company_id).first()
-    if not co:
+def company_dashboard(ctx : WorkspaceAuthDep, db: DbDep):
+    workspace = db.query(Workspace).options(joinedload(Workspace.settings)).filter(Workspace.id == ctx.workspace_id).first()
+    if not workspace:
         return CompanyDashboardResponse(
             company_name="",
             company_slug="",
-            role=ctx.member_role or "member",
+            role=ctx.member_role or TEAM_MEMBER,
             email_domain=None,
             projects_count=0,
             integrations_enabled=0,
@@ -158,24 +159,24 @@ def company_dashboard(ctx: CompanyAuthDep, db: DbDep):
             team_count=0,
         )
 
-    projects_count = db.query(func.count(Project.id)).filter(Project.company_id == co.id).scalar() or 0
-    integrations_enabled = len(_list_granted_integrations(db, co.id))
+    projects_count = db.query(func.count(Project.id)).filter(Project.workspace_id == workspace.id).scalar() or 0
+    integrations_enabled = len(_list_granted_integrations(db, workspace.id))
     services_enabled = (
-        db.query(func.count(CompanyPlatformService.platform_service_id))
+        db.query(func.count(WorkspacePlatformService.platform_service_id))
         .filter(
-            CompanyPlatformService.company_id == co.id,
-            CompanyPlatformService.is_enabled.is_(True),
+            WorkspacePlatformService.workspace_id == workspace.id,
+            WorkspacePlatformService.is_enabled.is_(True),
         )
         .scalar()
         or 0
     )
-    team_count = db.query(func.count(CompanyMember.id)).filter(CompanyMember.company_id == co.id).scalar() or 0
+    team_count = db.query(func.count(WorkspaceMember.id)).filter(WorkspaceMember.workspace_id == workspace.id).scalar() or 0
 
     return CompanyDashboardResponse(
-        company_name=co.name,
-        company_slug=co.slug,
-        role=ctx.member_role or "member",
-        email_domain=co.settings.email_domain if co.settings else None,
+        company_name=workspace.name,
+        company_slug=workspace.slug,
+        role=ctx.member_role or TEAM_MEMBER,
+        email_domain=workspace.settings.email_domain if workspace.settings else None,
         projects_count=projects_count,
         integrations_enabled=integrations_enabled,
         services_enabled=services_enabled,
@@ -184,20 +185,20 @@ def company_dashboard(ctx: CompanyAuthDep, db: DbDep):
 
 
 @router.get("/user-dashboard", response_model=UserDashboardResponse)
-def user_dashboard(ctx: CompanyAuthDep, db: DbDep):
-    co = (
-        db.query(Company)
-        .options(joinedload(Company.settings))
-        .filter(Company.id == ctx.company_id)
+def user_dashboard(ctx : WorkspaceAuthDep, db: DbDep):
+    ws = (
+        db.query(Workspace)
+        .options(joinedload(Workspace.settings))
+        .filter(Workspace.id == ctx.workspace_id)
         .first()
     )
-    assigned_ids = _assigned_integration_ids(db, ctx.company_id, ctx.user.id)
+    assigned_ids = _assigned_integration_ids(db, ctx.workspace_id, ctx.user.id)
     connected_count = 0
     integration_status: list[IntegrationStatusSummary] = []
-    for integration in _list_granted_integrations(db, ctx.company_id):
+    for integration in _list_granted_integrations(db, ctx.workspace_id):
         if integration.id not in assigned_ids:
             continue
-        conn = get_member_connection(db, ctx.company_id, ctx.user.id, integration.id)
+        conn = get_member_connection(db, ctx.workspace_id, ctx.user.id, integration.id)
         is_connected = bool(conn and conn.status == "connected")
         if is_connected:
             connected_count += 1
@@ -212,18 +213,18 @@ def user_dashboard(ctx: CompanyAuthDep, db: DbDep):
 
     my_projects_count = (
         db.query(func.count(Project.id))
-        .filter(Project.company_id == ctx.company_id, Project.created_by == ctx.user.id)
+        .filter(Project.workspace_id == ctx.workspace_id, Project.created_by == ctx.user.id)
         .scalar()
         or 0
     )
     company_projects_count = (
-        db.query(func.count(Project.id)).filter(Project.company_id == ctx.company_id).scalar() or 0
+        db.query(func.count(Project.id)).filter(Project.workspace_id == ctx.workspace_id).scalar() or 0
     )
     services_enabled = (
-        db.query(func.count(CompanyPlatformService.platform_service_id))
+        db.query(func.count(WorkspacePlatformService.platform_service_id))
         .filter(
-            CompanyPlatformService.company_id == ctx.company_id,
-            CompanyPlatformService.is_enabled.is_(True),
+            WorkspacePlatformService.workspace_id == ctx.workspace_id,
+            WorkspacePlatformService.is_enabled.is_(True),
         )
         .scalar()
         or 0
@@ -231,7 +232,7 @@ def user_dashboard(ctx: CompanyAuthDep, db: DbDep):
 
     recent = (
         db.query(Project)
-        .filter(Project.company_id == ctx.company_id)
+        .filter(Project.workspace_id == ctx.workspace_id)
         .order_by(Project.created_at.desc())
         .limit(5)
         .all()
@@ -243,10 +244,10 @@ def user_dashboard(ctx: CompanyAuthDep, db: DbDep):
     } if creator_ids else {}
 
     return UserDashboardResponse(
-        company_name=co.name if co else "",
-        company_slug=co.slug if co else "",
-        role=ctx.member_role or "member",
-        email_domain=co.settings.email_domain if co and co.settings else None,
+        company_name=ws.name if ws else "",
+        company_slug=ws.slug if ws else "",
+        role=ctx.member_role or TEAM_MEMBER,
+        email_domain=ws.settings.email_domain if ws and ws.settings else None,
         my_projects_count=my_projects_count,
         company_projects_count=company_projects_count,
         integrations_assigned=len(assigned_ids),
@@ -269,18 +270,18 @@ def user_dashboard(ctx: CompanyAuthDep, db: DbDep):
 
 
 @router.get("/profile", response_model=UserProfileResponse)
-def get_profile(ctx: CompanyAuthDep, db: DbDep):
+def get_profile(ctx : WorkspaceAuthDep, db: DbDep):
     member = (
-        db.query(CompanyMember)
-        .filter(CompanyMember.company_id == ctx.company_id, CompanyMember.user_id == ctx.user.id)
+        db.query(WorkspaceMember)
+        .filter(WorkspaceMember.workspace_id == ctx.workspace_id, WorkspaceMember.user_id == ctx.user.id)
         .first()
     )
     if not member:
         raise HTTPException(404, "Membership not found")
-    assigned = len(_assigned_integration_ids(db, ctx.company_id, ctx.user.id))
+    assigned = len(_assigned_integration_ids(db, ctx.workspace_id, ctx.user.id))
     connected = 0
-    for iid in _assigned_integration_ids(db, ctx.company_id, ctx.user.id):
-        conn = get_member_connection(db, ctx.company_id, ctx.user.id, iid)
+    for iid in _assigned_integration_ids(db, ctx.workspace_id, ctx.user.id):
+        conn = get_member_connection(db, ctx.workspace_id, ctx.user.id, iid)
         if conn and conn.status == "connected":
             connected += 1
     return UserProfileResponse(
@@ -296,7 +297,7 @@ def get_profile(ctx: CompanyAuthDep, db: DbDep):
 
 
 @router.patch("/profile", response_model=UserProfileResponse)
-def update_profile(body: UserProfileUpdateRequest, ctx: CompanyAuthDep, db: DbDep):
+def update_profile(body: UserProfileUpdateRequest, ctx : WorkspaceAuthDep, db: DbDep):
     ctx.user.full_name = body.full_name.strip()
     db.commit()
     db.refresh(ctx.user)
@@ -304,7 +305,7 @@ def update_profile(body: UserProfileUpdateRequest, ctx: CompanyAuthDep, db: DbDe
 
 
 @router.post("/profile/password")
-def change_password(body: ChangePasswordRequest, ctx: CompanyAuthDep, db: DbDep):
+def change_password(body: ChangePasswordRequest, ctx : WorkspaceAuthDep, db: DbDep):
     if not verify_password(body.current_password, ctx.user.password_hash):
         raise HTTPException(400, "Current password is incorrect")
     if len(body.new_password) < 8:
@@ -315,7 +316,7 @@ def change_password(body: ChangePasswordRequest, ctx: CompanyAuthDep, db: DbDep)
 
 
 @router.get("/integrations", response_model=list[CompanyIntegrationCatalogItem])
-def company_integrations_catalog(ctx: CompanyAdminDep, db: DbDep):
+def workspace_integrations_catalog(ctx : WorkspaceAdminDep, db: DbDep):
     return [
         CompanyIntegrationCatalogItem(
             integration_key=i.integration_key,
@@ -325,18 +326,18 @@ def company_integrations_catalog(ctx: CompanyAdminDep, db: DbDep):
             auth_type=i.auth_type,
             is_granted=True,
         )
-        for i in _list_granted_integrations(db, ctx.company_id)
+        for i in _list_granted_integrations(db, ctx.workspace_id)
     ]
 
 
 @router.get("/my-integrations", response_model=list[MyIntegrationItem])
-def my_integrations(ctx: CompanyAuthDep, db: DbDep):
-    assigned = _assigned_integration_ids(db, ctx.company_id, ctx.user.id)
+def my_integrations(ctx : WorkspaceAuthDep, db: DbDep):
+    assigned = _assigned_integration_ids(db, ctx.workspace_id, ctx.user.id)
     items = []
-    for integration in _list_granted_integrations(db, ctx.company_id):
+    for integration in _list_granted_integrations(db, ctx.workspace_id):
         if integration.id not in assigned:
             continue
-        conn = get_member_connection(db, ctx.company_id, ctx.user.id, integration.id)
+        conn = get_member_connection(db, ctx.workspace_id, ctx.user.id, integration.id)
         data = member_integration_to_dict(
             integration, conn, is_granted=True, is_assigned=True
         )
@@ -345,9 +346,9 @@ def my_integrations(ctx: CompanyAuthDep, db: DbDep):
 
 
 @router.get("/my-integrations/{key}", response_model=MyIntegrationItem)
-def get_my_integration(key: str, ctx: CompanyAuthDep, db: DbDep):
-    integration = _get_assigned_integration(db, ctx.company_id, ctx.user.id, key)
-    conn = get_member_connection(db, ctx.company_id, ctx.user.id, integration.id)
+def get_my_integration(key: str, ctx : WorkspaceAuthDep, db: DbDep):
+    integration = _get_assigned_integration(db, ctx.workspace_id, ctx.user.id, key)
+    conn = get_member_connection(db, ctx.workspace_id, ctx.user.id, integration.id)
     return MyIntegrationItem(
         **member_integration_to_dict(integration, conn, is_granted=True, is_assigned=True)
     )
@@ -355,12 +356,12 @@ def get_my_integration(key: str, ctx: CompanyAuthDep, db: DbDep):
 
 @router.put("/my-integrations/{key}/connection", response_model=MyIntegrationItem)
 def connect_my_integration(
-    key: str, body: CompanyIntegrationConnectRequest, ctx: CompanyWriterDep, db: DbDep
+    key: str, body: CompanyIntegrationConnectRequest, ctx: WorkspaceWriterDep, db: DbDep
 ):
-    integration = _get_assigned_integration(db, ctx.company_id, ctx.user.id, key)
+    integration = _get_assigned_integration(db, ctx.workspace_id, ctx.user.id, key)
     conn = save_member_connection(
         db,
-        ctx.company_id,
+        ctx.workspace_id,
         ctx.user.id,
         integration,
         body.connection_name,
@@ -372,28 +373,46 @@ def connect_my_integration(
 
 
 @router.post("/my-integrations/{key}/test", response_model=CompanyIntegrationTestResponse)
-def test_my_integration(key: str, ctx: CompanyWriterDep, db: DbDep):
-    integration = _get_assigned_integration(db, ctx.company_id, ctx.user.id, key)
-    conn = get_member_connection(db, ctx.company_id, ctx.user.id, integration.id)
+def test_my_integration(key: str, ctx : WorkspaceWriterDep, db: DbDep):
+    integration = _get_assigned_integration(db, ctx.workspace_id, ctx.user.id, key)
+    conn = get_member_connection(db, ctx.workspace_id, ctx.user.id, integration.id)
     if not conn or not conn.encrypted_config_ref:
         return CompanyIntegrationTestResponse(success=False, message="No connection configured")
     secrets = decrypt_secrets(conn.encrypted_config_ref)
-    success = bool(secrets or conn.config_metadata_json)
+    success = False
+    message = "Connection test failed"
+    try:
+        if integration.integration_key == "github":
+            from services.github_service import get_github_access_token, test_github_token
+
+            profile = test_github_token(get_github_access_token(conn))
+            conn.config_metadata_json = {
+                **(conn.config_metadata_json or {}),
+                "github_login": profile.get("login", ""),
+                "github_name": profile.get("name") or profile.get("login") or "",
+            }
+            success = True
+            message = f"Connected as {profile.get('login', 'GitHub user')}"
+        else:
+            success = bool(secrets or conn.config_metadata_json)
+            message = "Connection verified successfully" if success else "Connection test failed"
+    except Exception as exc:
+        success = False
+        message = str(exc)
+        conn.last_error_message = message
     conn.last_tested_at = datetime.now(UTC)
     conn.last_test_status = success
     conn.status = "connected" if success else "error"
-    conn.last_error_message = None if success else "Missing required credentials"
+    if success:
+        conn.last_error_message = None
     db.commit()
-    return CompanyIntegrationTestResponse(
-        success=success,
-        message="Connection verified successfully" if success else "Connection test failed",
-    )
+    return CompanyIntegrationTestResponse(success=success, message=message)
 
 
 @router.delete("/my-integrations/{key}/connection", response_model=MyIntegrationItem)
-def disconnect_my_integration(key: str, ctx: CompanyWriterDep, db: DbDep):
-    integration = _get_assigned_integration(db, ctx.company_id, ctx.user.id, key)
-    conn = get_member_connection(db, ctx.company_id, ctx.user.id, integration.id)
+def disconnect_my_integration(key: str, ctx : WorkspaceWriterDep, db: DbDep):
+    integration = _get_assigned_integration(db, ctx.workspace_id, ctx.user.id, key)
+    conn = get_member_connection(db, ctx.workspace_id, ctx.user.id, integration.id)
     if conn:
         db.delete(conn)
         db.commit()
@@ -403,11 +422,11 @@ def disconnect_my_integration(key: str, ctx: CompanyWriterDep, db: DbDep):
 
 
 @router.get("/services", response_model=list[CompanyServiceItem])
-def company_services(ctx: CompanyAuthDep, db: DbDep):
+def company_services(ctx : WorkspaceAuthDep, db: DbDep):
     access_map = {
         row.platform_service_id: row.is_enabled
-        for row in db.query(CompanyPlatformService)
-        .filter(CompanyPlatformService.company_id == ctx.company_id)
+        for row in db.query(WorkspacePlatformService)
+        .filter(WorkspacePlatformService.workspace_id == ctx.workspace_id)
         .all()
     }
     services = db.query(PlatformService).order_by(PlatformService.display_name).all()
@@ -418,28 +437,28 @@ def company_services(ctx: CompanyAuthDep, db: DbDep):
     ]
 
 
-@router.get("/members", response_model=list[CompanyMemberResponse])
-def list_members(ctx: CompanyAdminDep, db: DbDep):
+@router.get("/members", response_model=list[WorkspaceMemberResponse])
+def list_members(ctx : WorkspaceAdminDep, db: DbDep):
     members = (
-        db.query(CompanyMember)
+        db.query(WorkspaceMember)
         .join(User)
-        .filter(CompanyMember.company_id == ctx.company_id)
-        .order_by(CompanyMember.joined_at.asc())
+        .filter(WorkspaceMember.workspace_id == ctx.workspace_id)
+        .order_by(WorkspaceMember.joined_at.asc())
         .all()
     )
     return [_member_response(db, m) for m in members]
 
 
-@router.post("/members", response_model=CompanyMemberResponse, status_code=201)
-def create_member(body: CompanyMemberCreateRequest, ctx: CompanyAdminDep, db: DbDep):
-    if body.role not in ("admin", "member", "viewer"):
+@router.post("/members", response_model=WorkspaceMemberResponse, status_code=201)
+def create_member(body: WorkspaceMemberCreateRequest, ctx : WorkspaceAdminDep, db: DbDep):
+    if body.role not in VALID_MEMBER_ROLES:
         raise HTTPException(400, "Invalid role")
-    email_domain = _require_email_domain(db, ctx.company_id)
+    email_domain = _require_email_domain(db, ctx.workspace_id)
     email = body.email.lower().strip()
     if not email_matches_domain(email, email_domain):
         raise HTTPException(
             400,
-            f"Employee email must use your company domain @{normalize_domain(email_domain)}",
+            f"Employee email must use your Workspace domain @{normalize_domain(email_domain)}",
         )
 
     user = db.query(User).filter(User.email == email).first()
@@ -454,39 +473,39 @@ def create_member(body: CompanyMemberCreateRequest, ctx: CompanyAdminDep, db: Db
         db.add(user)
         db.flush()
     elif user.is_super_admin:
-        raise HTTPException(400, "Cannot add platform super admin as company member")
+        raise HTTPException(400, "Cannot add platform super admin as Workspace member")
     elif not email_matches_domain(user.email, email_domain):
         raise HTTPException(400, f"Existing user email must match @{normalize_domain(email_domain)}")
 
     existing = (
-        db.query(CompanyMember)
-        .filter(CompanyMember.company_id == ctx.company_id, CompanyMember.user_id == user.id)
+        db.query(WorkspaceMember)
+        .filter(WorkspaceMember.workspace_id == ctx.workspace_id, WorkspaceMember.user_id == user.id)
         .first()
     )
     if existing:
-        raise HTTPException(400, "User is already a member of this company")
+        raise HTTPException(400, "User is already a member of this Workspace")
 
-    member = CompanyMember(company_id=ctx.company_id, user_id=user.id, role=body.role)
+    member = WorkspaceMember(workspace_id=ctx.workspace_id, user_id=user.id, role=body.role)
     db.add(member)
     db.commit()
     db.refresh(member)
     return _member_response(db, member)
 
 
-@router.get("/members/{member_id}", response_model=CompanyMemberResponse)
-def get_member(member_id: str, ctx: CompanyAuthDep, db: DbDep):
-    member = _get_member(db, ctx.company_id, member_id)
-    if ctx.member_role != "admin" and member.user_id != ctx.user.id:
+@router.get("/members/{member_id}", response_model=WorkspaceMemberResponse)
+def get_member(member_id: str, ctx : WorkspaceAuthDep, db: DbDep):
+    member = _get_member(db, ctx.workspace_id, member_id)
+    if ctx.member_role != TEAM_LEAD and member.user_id != ctx.user.id:
         raise HTTPException(403, "Not allowed to view this member")
     return _member_response(db, member)
 
 
-@router.patch("/members/{member_id}", response_model=CompanyMemberResponse)
-def update_member(member_id: str, body: CompanyMemberUpdateRequest, ctx: CompanyAdminDep, db: DbDep):
-    member = _get_member(db, ctx.company_id, member_id)
+@router.patch("/members/{member_id}", response_model=WorkspaceMemberResponse)
+def update_member(member_id: str, body: WorkspaceMemberUpdateRequest, ctx : WorkspaceAdminDep, db: DbDep):
+    member = _get_member(db, ctx.workspace_id, member_id)
     user = db.query(User).filter(User.id == member.user_id).first()
     if body.role is not None:
-        if body.role not in ("admin", "member", "viewer"):
+        if body.role not in VALID_MEMBER_ROLES:
             raise HTTPException(400, "Invalid role")
         member.role = body.role
     if body.is_active is not None and user:
@@ -497,23 +516,23 @@ def update_member(member_id: str, body: CompanyMemberUpdateRequest, ctx: Company
 
 
 @router.get("/members/{member_id}/integrations", response_model=list[MemberIntegrationAccessItem])
-def get_member_integrations(member_id: str, ctx: CompanyAuthDep, db: DbDep):
-    member = _get_member(db, ctx.company_id, member_id)
-    if ctx.member_role != "admin" and member.user_id != ctx.user.id:
+def get_member_integrations(member_id: str, ctx : WorkspaceAuthDep, db: DbDep):
+    member = _get_member(db, ctx.workspace_id, member_id)
+    if ctx.member_role != TEAM_LEAD and member.user_id != ctx.user.id:
         raise HTTPException(403, "Not allowed to view this member's integrations")
 
     assigned = {
         row.platform_integration_id: row.is_enabled
         for row in db.query(MemberIntegrationAccess)
         .filter(
-            MemberIntegrationAccess.company_id == ctx.company_id,
+            MemberIntegrationAccess.workspace_id == ctx.workspace_id,
             MemberIntegrationAccess.user_id == member.user_id,
         )
         .all()
     }
     items = []
-    for integration in _list_granted_integrations(db, ctx.company_id):
-        conn = get_member_connection(db, ctx.company_id, member.user_id, integration.id)
+    for integration in _list_granted_integrations(db, ctx.workspace_id):
+        conn = get_member_connection(db, ctx.workspace_id, member.user_id, integration.id)
         is_connected = bool(conn and conn.status == "connected")
         items.append(
             MemberIntegrationAccessItem(
@@ -529,10 +548,10 @@ def get_member_integrations(member_id: str, ctx: CompanyAuthDep, db: DbDep):
 
 @router.put("/members/{member_id}/integrations", response_model=list[MemberIntegrationAccessItem])
 def update_member_integrations(
-    member_id: str, body: MemberIntegrationsAccessUpdate, ctx: CompanyAdminDep, db: DbDep
+    member_id: str, body: MemberIntegrationsAccessUpdate, ctx : WorkspaceAdminDep, db: DbDep
 ):
-    member = _get_member(db, ctx.company_id, member_id)
-    key_to_integration = {i.integration_key: i for i in _list_granted_integrations(db, ctx.company_id)}
+    member = _get_member(db, ctx.workspace_id, member_id)
+    key_to_integration = {i.integration_key: i for i in _list_granted_integrations(db, ctx.workspace_id)}
 
     for item in body.integrations:
         integration = key_to_integration.get(item.integration_key)
@@ -541,7 +560,7 @@ def update_member_integrations(
         row = (
             db.query(MemberIntegrationAccess)
             .filter(
-                MemberIntegrationAccess.company_id == ctx.company_id,
+                MemberIntegrationAccess.workspace_id == ctx.workspace_id,
                 MemberIntegrationAccess.user_id == member.user_id,
                 MemberIntegrationAccess.platform_integration_id == integration.id,
             )
@@ -553,7 +572,7 @@ def update_member_integrations(
             else:
                 db.add(
                     MemberIntegrationAccess(
-                        company_id=ctx.company_id,
+                        workspace_id=ctx.workspace_id,
                         user_id=member.user_id,
                         platform_integration_id=integration.id,
                         is_enabled=True,
@@ -567,18 +586,13 @@ def update_member_integrations(
     return get_member_integrations(member_id, ctx, db)
 
 
-def _max_projects(db: Session, company: Company) -> int:
-    company = (
-        db.query(Company)
-        .options(joinedload(Company.plan), joinedload(Company.limits))
-        .filter(Company.id == company.id)
-        .first()
-    )
-    if company and company.limits and company.limits.max_projects is not None:
-        return company.limits.max_projects
-    if company and company.plan:
-        return company.plan.max_projects
-    return 5
+from constants.workspace import MAX_PROJECTS
+
+
+def _max_projects(_db: Session, workspace: Workspace) -> int:
+    if workspace.limits and workspace.limits.max_projects is not None:
+        return workspace.limits.max_projects
+    return MAX_PROJECTS
 
 
 def _project_response(db: Session, project: Project) -> ProjectResponse:
@@ -601,6 +615,7 @@ def _project_response(db: Session, project: Project) -> ProjectResponse:
         backend_stack=project.backend_stack,
         db_type=project.db_type,
         vcs_provider=project.vcs_provider,
+        repo_url=project.repo_url,
         pm_tool=project.pm_tool,
         notification_channels=project.notification_channels or [],
         monthly_token_budget_usd=float(project.monthly_token_budget_usd)
@@ -616,10 +631,10 @@ def _project_response(db: Session, project: Project) -> ProjectResponse:
 
 
 @router.get("/projects", response_model=list[ProjectSummary])
-def list_projects(ctx: CompanyAuthDep, db: DbDep):
+def list_projects(ctx : WorkspaceAuthDep, db: DbDep):
     projects = (
         db.query(Project)
-        .filter(Project.company_id == ctx.company_id)
+        .filter(Project.workspace_id == ctx.workspace_id)
         .order_by(Project.updated_at.desc())
         .all()
     )
@@ -642,27 +657,27 @@ def list_projects(ctx: CompanyAuthDep, db: DbDep):
 
 
 @router.post("/projects", response_model=ProjectResponse, status_code=201)
-def create_project(body: ProjectCreateRequest, ctx: CompanyWriterDep, db: DbDep):
-    company = (
-        db.query(Company)
-        .options(joinedload(Company.plan), joinedload(Company.limits))
-        .filter(Company.id == ctx.company_id)
+def create_project(body: ProjectCreateRequest, ctx : WorkspaceWriterDep, db: DbDep):
+    workspace = (
+        db.query(Workspace)
+        .options(joinedload(Workspace.plan), joinedload(Workspace.limits))
+        .filter(Workspace.id == ctx.workspace_id)
         .first()
     )
-    if not company:
-        raise HTTPException(404, "Company not found")
+    if not workspace:
+        raise HTTPException(404, "Workspace not found")
     current_count = (
-        db.query(func.count(Project.id)).filter(Project.company_id == ctx.company_id).scalar() or 0
+        db.query(func.count(Project.id)).filter(Project.workspace_id == ctx.workspace_id).scalar() or 0
     )
-    if current_count >= _max_projects(db, company):
-        raise HTTPException(400, "Project limit reached for your company plan")
+    if current_count >= _max_projects(db, workspace):
+        raise HTTPException(400, "Project limit reached for your Workspace plan")
 
     name = body.name.strip()
-    if db.query(Project).filter(Project.company_id == ctx.company_id, Project.name == name).first():
+    if db.query(Project).filter(Project.workspace_id == ctx.workspace_id, Project.name == name).first():
         raise HTTPException(400, "A project with this name already exists")
 
     project = Project(
-        company_id=ctx.company_id,
+        workspace_id=ctx.workspace_id,
         created_by=ctx.user.id,
         name=name,
         description=body.description,
@@ -671,6 +686,7 @@ def create_project(body: ProjectCreateRequest, ctx: CompanyWriterDep, db: DbDep)
         backend_stack=body.backend_stack,
         db_type=body.db_type,
         vcs_provider=body.vcs_provider,
+        repo_url=body.repo_url,
         pm_tool=body.pm_tool,
         notification_channels=body.notification_channels,
         monthly_token_budget_usd=body.monthly_token_budget_usd,
@@ -682,19 +698,19 @@ def create_project(body: ProjectCreateRequest, ctx: CompanyWriterDep, db: DbDep)
 
 
 @router.get("/projects/{project_id}", response_model=ProjectResponse)
-def get_project(project_id: str, ctx: CompanyAuthDep, db: DbDep):
-    project = _get_project(db, ctx.company_id, project_id)
+def get_project(project_id: str, ctx : WorkspaceAuthDep, db: DbDep):
+    project = _get_project(db, ctx.workspace_id, project_id)
     return _project_response(db, project)
 
 
 @router.patch("/projects/{project_id}", response_model=ProjectResponse)
-def update_project(project_id: str, body: ProjectUpdateRequest, ctx: CompanyWriterDep, db: DbDep):
-    project = _get_project(db, ctx.company_id, project_id)
+def update_project(project_id: str, body: ProjectUpdateRequest, ctx : WorkspaceWriterDep, db: DbDep):
+    project = _get_project(db, ctx.workspace_id, project_id)
     if body.name is not None:
         name = body.name.strip()
         existing = (
             db.query(Project)
-            .filter(Project.company_id == ctx.company_id, Project.name == name, Project.id != project.id)
+            .filter(Project.workspace_id == ctx.workspace_id, Project.name == name, Project.id != project.id)
             .first()
         )
         if existing:
@@ -711,6 +727,7 @@ def update_project(project_id: str, body: ProjectUpdateRequest, ctx: CompanyWrit
         "backend_stack",
         "db_type",
         "vcs_provider",
+        "repo_url",
         "pm_tool",
         "notification_channels",
         "monthly_token_budget_usd",
@@ -724,8 +741,8 @@ def update_project(project_id: str, body: ProjectUpdateRequest, ctx: CompanyWrit
 
 
 @router.get("/projects/{project_id}/runs", response_model=list[PipelineRunSummary])
-def list_project_runs(project_id: str, ctx: CompanyAuthDep, db: DbDep):
-    project = _get_project(db, ctx.company_id, project_id)
+def list_project_runs(project_id: str, ctx : WorkspaceAuthDep, db: DbDep):
+    project = _get_project(db, ctx.workspace_id, project_id)
     runs = (
         db.query(PipelineRun)
         .filter(PipelineRun.project_id == project.id)
@@ -747,10 +764,10 @@ def list_project_runs(project_id: str, ctx: CompanyAuthDep, db: DbDep):
     ]
 
 
-def _get_project(db: Session, company_id, project_id: str) -> Project:
+def _get_project(db: Session, workspace_id, project_id: str) -> Project:
     project = (
         db.query(Project)
-        .filter(Project.id == project_id, Project.company_id == company_id)
+        .filter(Project.id == project_id, Project.workspace_id == workspace_id)
         .first()
     )
     if not project:
@@ -758,10 +775,10 @@ def _get_project(db: Session, company_id, project_id: str) -> Project:
     return project
 
 
-def _get_member(db: Session, company_id, member_id: str) -> CompanyMember:
+def _get_member(db: Session, workspace_id, member_id: str) -> WorkspaceMember:
     member = (
-        db.query(CompanyMember)
-        .filter(CompanyMember.id == member_id, CompanyMember.company_id == company_id)
+        db.query(WorkspaceMember)
+        .filter(WorkspaceMember.id == member_id, WorkspaceMember.workspace_id == workspace_id)
         .first()
     )
     if not member:
@@ -769,19 +786,31 @@ def _get_member(db: Session, company_id, member_id: str) -> CompanyMember:
     return member
 
 
-def _member_response(db: Session, member: CompanyMember) -> CompanyMemberResponse:
+def _member_response(db: Session, member: WorkspaceMember) -> WorkspaceMemberResponse:
+    from models.agents import MemberAgentAccess
+
     user = db.query(User).filter(User.id == member.user_id).first()
     assigned_count = (
         db.query(func.count(MemberIntegrationAccess.platform_integration_id))
         .filter(
-            MemberIntegrationAccess.company_id == member.company_id,
+            MemberIntegrationAccess.workspace_id == member.workspace_id,
             MemberIntegrationAccess.user_id == member.user_id,
             MemberIntegrationAccess.is_enabled.is_(True),
         )
         .scalar()
         or 0
     )
-    return CompanyMemberResponse(
+    agents_count = (
+        db.query(func.count(MemberAgentAccess.platform_agent_id))
+        .filter(
+            MemberAgentAccess.workspace_id == member.workspace_id,
+            MemberAgentAccess.user_id == member.user_id,
+            MemberAgentAccess.is_enabled.is_(True),
+        )
+        .scalar()
+        or 0
+    )
+    return WorkspaceMemberResponse(
         id=member.id,
         user_id=member.user_id,
         email=user.email if user else "",
@@ -789,5 +818,6 @@ def _member_response(db: Session, member: CompanyMember) -> CompanyMemberRespons
         role=member.role,
         is_active=user.is_active if user else False,
         integrations_assigned=assigned_count,
+        agents_assigned=agents_count,
         joined_at=member.joined_at,
     )

@@ -26,7 +26,7 @@ class PlatformIntegration(Base, TimestampMixin):
 
     connections: Mapped[list["PlatformConnection"]] = relationship(back_populates="integration")
     plan_links: Mapped[list["PlanPlatformIntegration"]] = relationship(back_populates="integration")
-    company_links: Mapped[list["CompanyPlatformIntegration"]] = relationship(back_populates="integration")
+    workspace_links: Mapped[list["WorkspacePlatformIntegration"]] = relationship(back_populates="integration")
 
 
 class PlatformConnection(Base, TimestampMixin):
@@ -70,10 +70,10 @@ class PlatformService(Base, TimestampMixin):
     )
 
     plan_links: Mapped[list["PlanPlatformService"]] = relationship(back_populates="service")
-    company_links: Mapped[list["CompanyPlatformService"]] = relationship(back_populates="service")
+    workspace_links: Mapped[list["WorkspacePlatformService"]] = relationship(back_populates="service")
 
     plan_links: Mapped[list["PlanPlatformService"]] = relationship(back_populates="service")
-    company_links: Mapped[list["CompanyPlatformService"]] = relationship(back_populates="service")
+    workspace_links: Mapped[list["WorkspacePlatformService"]] = relationship(back_populates="service")
 
 
 class PlatformSetting(Base):
@@ -109,27 +109,27 @@ class PlanPlatformService(Base):
     service: Mapped["PlatformService"] = relationship(back_populates="plan_links")
 
 
-class CompanyPlatformIntegration(Base):
-    __tablename__ = "company_platform_integrations"
+class WorkspacePlatformIntegration(Base):
+    __tablename__ = "workspace_platform_integrations"
 
-    company_id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("companies.id", ondelete="CASCADE"), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
     platform_integration_id: Mapped[UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("platform_integrations.id", ondelete="CASCADE"), primary_key=True
     )
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    integration: Mapped["PlatformIntegration"] = relationship(back_populates="company_links")
+    integration: Mapped["PlatformIntegration"] = relationship(back_populates="workspace_links")
 
 
-class CompanyPlatformService(Base):
-    __tablename__ = "company_platform_services"
+class WorkspacePlatformService(Base):
+    __tablename__ = "workspace_platform_services"
 
-    company_id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("companies.id", ondelete="CASCADE"), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
     platform_service_id: Mapped[UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("platform_services.id", ondelete="CASCADE"), primary_key=True
     )
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    service: Mapped["PlatformService"] = relationship(back_populates="company_links")
+    service: Mapped["PlatformService"] = relationship(back_populates="workspace_links")

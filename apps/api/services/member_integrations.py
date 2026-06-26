@@ -3,19 +3,19 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from models.company_portal import MemberIntegrationConnection
+from models.workspace_portal import MemberIntegrationConnection
 from models.platform import PlatformIntegration
 from services.platform_helpers import split_config_fields
 from services.secrets import decrypt_secrets, encrypt_secrets
 
 
 def get_member_connection(
-    db: Session, company_id, user_id, platform_integration_id
+    db: Session, workspace_id, user_id, platform_integration_id
 ) -> MemberIntegrationConnection | None:
     return (
         db.query(MemberIntegrationConnection)
         .filter(
-            MemberIntegrationConnection.company_id == company_id,
+            MemberIntegrationConnection.workspace_id == workspace_id,
             MemberIntegrationConnection.user_id == user_id,
             MemberIntegrationConnection.platform_integration_id == platform_integration_id,
         )
@@ -54,17 +54,17 @@ def member_integration_to_dict(
 
 def save_member_connection(
     db: Session,
-    company_id,
+    workspace_id,
     user_id,
     integration: PlatformIntegration,
     connection_name: str,
     config: dict[str, Any],
 ) -> MemberIntegrationConnection:
     secrets, metadata = split_config_fields(integration, config)
-    conn = get_member_connection(db, company_id, user_id, integration.id)
+    conn = get_member_connection(db, workspace_id, user_id, integration.id)
     if not conn:
         conn = MemberIntegrationConnection(
-            company_id=company_id,
+            workspace_id=workspace_id,
             user_id=user_id,
             platform_integration_id=integration.id,
         )

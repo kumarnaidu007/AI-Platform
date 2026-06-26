@@ -7,8 +7,9 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
+from constants.roles import TEAM_LEAD
 from db.session import SessionLocal
-from models import Company, CompanyMember, User
+from models import User, Workspace, WorkspaceMember
 from services.auth import decode_access_token, is_token_revoked
 
 security = HTTPBearer(auto_error=False)
@@ -18,8 +19,8 @@ security = HTTPBearer(auto_error=False)
 class AuthContext:
     user: User
     portal: str
-    company_id: UUID | None = None
-    company_slug: str | None = None
+    workspace_id: UUID | None = None
+    workspace_slug: str | None = None
     member_role: str | None = None
     jti: str | None = None
     token_exp: int | None = None
@@ -58,12 +59,13 @@ def get_auth_context(
     if not user or not user.is_active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found or inactive")
 
-    company_id = payload.get("company_id")
+    workspace_id = payload.get("workspace_id") or payload.get("company_id")
+    workspace_slug = payload.get("workspace_slug") or payload.get("company_slug")
     return AuthContext(
         user=user,
         portal=portal,
-        company_id=UUID(company_id) if company_id else None,
-        company_slug=payload.get("company_slug"),
+        workspace_id=UUID(workspace_id) if workspace_id else None,
+        workspace_slug=workspace_slug,
         member_role=payload.get("role"),
         jti=jti,
         token_exp=token_exp,
@@ -80,24 +82,33 @@ def require_super_admin(ctx: Annotated[AuthContext, Depends(get_auth_context)]) 
     return ctx.user
 
 
-def require_company_member(
+def require_workspace_member(
     db: DbDep,
     ctx: Annotated[AuthContext, Depends(get_auth_context)],
 ) -> AuthContext:
-    if ctx.portal != "company" or not ctx.company_id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Company portal access required")
+    if ctx.portal == "admin" and ctx.user.is_super_admin:
+        from services.workspace_helpers import require_default_workspace
+
+        workspace = require_default_workspace(db)
+        ctx.workspace_id = workspace.id
+        ctx.workspace_slug = workspace.slug
+        ctx.member_role = TEAM_LEAD
+        return ctx
+
+    if ctx.portal != "workspace" or not ctx.workspace_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Workspace access required")
 
     membership = (
-        db.query(CompanyMember)
-        .filter(CompanyMember.user_id == ctx.user.id, CompanyMember.company_id == ctx.company_id)
+        db.query(WorkspaceMember)
+        .filter(WorkspaceMember.user_id == ctx.user.id, WorkspaceMember.workspace_id == ctx.workspace_id)
         .first()
     )
     if not membership:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not a member of this company")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not a member of this workspace")
 
-    company = db.query(Company).filter(Company.id == ctx.company_id).first()
-    if not company or company.status == "suspended":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Company is suspended or not found")
+    workspace = db.query(Workspace).filter(Workspace.id == ctx.workspace_id).first()
+    if not workspace or workspace.status == "suspended":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Workspace is suspended or not found")
 
     ctx.member_role = membership.role
     return ctx
@@ -105,22 +116,21 @@ def require_company_member(
 
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
 SuperAdminDep = Annotated[User, Depends(require_super_admin)]
-CompanyAuthDep = Annotated[AuthContext, Depends(require_company_member)]
+WorkspaceAuthDep = Annotated[AuthContext, Depends(require_workspace_member)]
 
 
-def require_company_admin(ctx: CompanyAuthDep) -> AuthContext:
-    if ctx.member_role != "admin":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Company admin access required")
+def require_team_lead(ctx: WorkspaceAuthDep) -> AuthContext:
+    if ctx.member_role != TEAM_LEAD:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Team lead access required")
     return ctx
 
 
-CompanyAdminDep = Annotated[AuthContext, Depends(require_company_admin)]
+TeamLeadDep = Annotated[AuthContext, Depends(require_team_lead)]
+WorkspaceAdminDep = TeamLeadDep
 
 
-def require_company_writer(ctx: CompanyAuthDep) -> AuthContext:
-    if ctx.member_role == "viewer":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Viewer accounts have read-only access")
+def require_workspace_writer(ctx: WorkspaceAuthDep) -> AuthContext:
     return ctx
 
 
-CompanyWriterDep = Annotated[AuthContext, Depends(require_company_writer)]
+WorkspaceWriterDep = Annotated[AuthContext, Depends(require_workspace_writer)]
