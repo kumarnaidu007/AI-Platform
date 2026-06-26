@@ -2,15 +2,12 @@
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- Enums
-CREATE TYPE company_status AS ENUM ('active', 'suspended', 'trial');
-CREATE TYPE member_role AS ENUM ('admin', 'member', 'viewer');
+CREATE TYPE workspace_status AS ENUM ('active', 'suspended', 'trial');
+CREATE TYPE member_role AS ENUM ('team_lead', 'team_member');
 CREATE TYPE project_status AS ENUM ('draft', 'active', 'paused', 'completed', 'failed', 'archived');
-CREATE TYPE pipeline_status AS ENUM ('pending', 'running', 'completed', 'failed', 'cancelled');
+CREATE TYPE pipeline_status AS ENUM ('pending', 'running', 'completed', 'failed', 'cancelled', 'awaiting_approval');
 CREATE TYPE step_status AS ENUM ('pending', 'running', 'completed', 'failed', 'skipped', 'needs_manual_review');
-CREATE TYPE integration_type AS ENUM (
-  'github', 'gitlab', 'azure_devops', 'jira', 'notion', 'linear',
-  'slack', 'teams', 'email'
-);
+CREATE TYPE integration_type AS ENUM ('github', 'jira');
 CREATE TYPE audit_action AS ENUM (
   'create', 'update', 'delete', 'login', 'invite', 'suspend',
   'pipeline_start', 'pipeline_complete'
@@ -39,38 +36,38 @@ CREATE TABLE plans (
     created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Tenancy: companies
-CREATE TABLE companies (
+-- Single workspace tenancy
+CREATE TABLE workspaces (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name        VARCHAR(255) NOT NULL,
     slug        VARCHAR(100) NOT NULL UNIQUE,
-    status      company_status NOT NULL DEFAULT 'trial',
+    status      workspace_status NOT NULL DEFAULT 'active',
     plan_id     UUID NOT NULL REFERENCES plans(id) ON DELETE RESTRICT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE company_limits (
-    company_id               UUID PRIMARY KEY REFERENCES companies(id) ON DELETE CASCADE,
+CREATE TABLE workspace_limits (
+    workspace_id             UUID PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
     max_projects             INTEGER,
     max_parallel_pipelines   INTEGER,
     monthly_token_budget_usd NUMERIC(12, 4),
     updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE company_members (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    company_id  UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-    user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    role        member_role NOT NULL DEFAULT 'member',
-    invited_at  TIMESTAMPTZ,
-    joined_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (company_id, user_id)
+CREATE TABLE workspace_members (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id  UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role          member_role NOT NULL DEFAULT 'team_member',
+    invited_at    TIMESTAMPTZ,
+    joined_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (workspace_id, user_id)
 );
 
-CREATE TABLE company_settings (
-    company_id                      UUID PRIMARY KEY REFERENCES companies(id) ON DELETE CASCADE,
+CREATE TABLE workspace_settings (
+    workspace_id                    UUID PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
     default_notification_channels   TEXT[] DEFAULT '{}',
     timezone                        VARCHAR(64) DEFAULT 'UTC',
     updated_at                      TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -78,7 +75,7 @@ CREATE TABLE company_settings (
 
 CREATE TABLE integration_configs (
     id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    company_id           UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    workspace_id         UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     integration_type     integration_type NOT NULL,
     display_name         VARCHAR(255),
     encrypted_config_ref VARCHAR(512) NOT NULL,
@@ -87,13 +84,13 @@ CREATE TABLE integration_configs (
     last_test_status     BOOLEAN,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (company_id, integration_type, display_name)
+    UNIQUE (workspace_id, integration_type, display_name)
 );
 
 -- AI Dev: projects & pipelines
 CREATE TABLE projects (
     id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    company_id               UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    workspace_id             UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     created_by               UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     name                     VARCHAR(255) NOT NULL,
     description              TEXT,
@@ -102,12 +99,13 @@ CREATE TABLE projects (
     backend_stack            VARCHAR(64),
     db_type                  VARCHAR(64),
     vcs_provider             VARCHAR(64),
+    repo_url                 VARCHAR(512),
     pm_tool                  VARCHAR(64),
     notification_channels    TEXT[] DEFAULT '{}',
     monthly_token_budget_usd NUMERIC(12, 4),
     created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (company_id, name)
+    UNIQUE (workspace_id, name)
 );
 
 CREATE TABLE pipeline_runs (
@@ -213,7 +211,7 @@ CREATE TABLE validation_reports (
 -- Audit & usage
 CREATE TABLE audit_events (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    company_id    UUID REFERENCES companies(id) ON DELETE SET NULL,
+    workspace_id  UUID REFERENCES workspaces(id) ON DELETE SET NULL,
     user_id       UUID REFERENCES users(id) ON DELETE SET NULL,
     action        audit_action NOT NULL,
     resource_type VARCHAR(64) NOT NULL,
@@ -225,7 +223,7 @@ CREATE TABLE audit_events (
 
 CREATE TABLE usage_ledger (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    company_id      UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    workspace_id    UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     project_id      UUID REFERENCES projects(id) ON DELETE SET NULL,
     pipeline_run_id UUID REFERENCES pipeline_runs(id) ON DELETE SET NULL,
     event_type      VARCHAR(64) NOT NULL,
@@ -236,19 +234,16 @@ CREATE TABLE usage_ledger (
 );
 
 -- Indexes
-CREATE INDEX idx_company_members_user ON company_members(user_id);
-CREATE INDEX idx_company_members_company ON company_members(company_id);
-CREATE INDEX idx_projects_company_status ON projects(company_id, status);
+CREATE INDEX idx_workspace_members_user ON workspace_members(user_id);
+CREATE INDEX idx_workspace_members_workspace ON workspace_members(workspace_id);
+CREATE INDEX idx_projects_workspace_status ON projects(workspace_id, status);
 CREATE INDEX idx_pipeline_runs_project ON pipeline_runs(project_id, status);
 CREATE INDEX idx_pipeline_steps_run ON pipeline_steps(pipeline_run_id);
 CREATE INDEX idx_agent_logs_step ON agent_logs(pipeline_step_id);
-CREATE INDEX idx_audit_events_company ON audit_events(company_id, created_at DESC);
-CREATE INDEX idx_usage_ledger_company ON usage_ledger(company_id, created_at DESC);
-CREATE INDEX idx_integration_configs_company ON integration_configs(company_id);
+CREATE INDEX idx_audit_events_workspace ON audit_events(workspace_id, created_at DESC);
+CREATE INDEX idx_usage_ledger_workspace ON usage_ledger(workspace_id, created_at DESC);
+CREATE INDEX idx_integration_configs_workspace ON integration_configs(workspace_id);
 
--- Seed data
+-- Minimal plan catalog (limits enforced in app constants)
 INSERT INTO plans (name, max_projects, max_parallel_pipelines, monthly_token_budget_usd)
-VALUES
-  ('Starter', 3, 1, 50.0000),
-  ('Professional', 10, 3, 250.0000),
-  ('Enterprise', 50, 10, 1000.0000);
+VALUES ('Platform', 50, 10, 1000.0000);

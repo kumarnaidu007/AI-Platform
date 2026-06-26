@@ -1,11 +1,11 @@
--- Company email domain + per-user integration credentials
+-- Workspace email domain + per-user integration credentials
 
-ALTER TABLE company_settings
+ALTER TABLE workspace_settings
     ADD COLUMN IF NOT EXISTS email_domain VARCHAR(255);
 
 CREATE TABLE member_integration_connections (
     id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    company_id              UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    workspace_id            UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     user_id                 UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     platform_integration_id UUID NOT NULL REFERENCES platform_integrations(id) ON DELETE CASCADE,
     connection_name         VARCHAR(255) NOT NULL DEFAULT 'Default',
@@ -17,8 +17,8 @@ CREATE TABLE member_integration_connections (
     last_error_message      TEXT,
     created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (company_id, user_id, platform_integration_id)
+    UNIQUE (workspace_id, user_id, platform_integration_id)
 );
 
-CREATE INDEX idx_member_integration_connections_user
-    ON member_integration_connections(company_id, user_id);
+CREATE INDEX idx_member_integration_connections_workspace_user
+    ON member_integration_connections(workspace_id, user_id);
