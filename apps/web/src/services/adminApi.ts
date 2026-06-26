@@ -8,6 +8,7 @@ import type {
   PlatformSetting,
 } from "@/types/platform";
 import type { AuditEvent, Company, CompanyDetail, CompanyIntegrationAccess, CompanyServiceAccess, Plan, PlatformMetrics } from "@/types/admin";
+import type { CompanyAgentAccess, PlatformAgent } from "@/types/agents";
 
 // api client with auth interceptors — see authApi.ts
 
@@ -127,11 +128,12 @@ export const adminApi = {
 
   updatePlatformService: async (
     serviceKey: string,
-    patch: { isEnabled?: boolean; apiKey?: string }
+    patch: { isEnabled?: boolean; apiKey?: string; configMetadata?: Record<string, string> }
   ) => {
     const { data } = await api.patch<Record<string, unknown>>(`/api/admin/platform-services/${serviceKey}`, {
       is_enabled: patch.isEnabled,
       api_key: patch.apiKey,
+      config_metadata: patch.configMetadata,
     });
     return mapService(data);
   },
@@ -178,6 +180,21 @@ export const adminApi = {
       },
       recentProjects: (data.recent_projects as CompanyDetail["recentProjects"]) ?? [],
     } as CompanyDetail;
+  },
+
+  getCompanyMembers: async (teamId: string) => {
+    const { data } = await api.get<Record<string, unknown>[]>(`/api/admin/companies/${teamId}/members`);
+    return data.map((row) => ({
+      id: String(row.id),
+      userId: String(row.user_id),
+      email: String(row.email),
+      fullName: String(row.full_name),
+      role: String(row.role),
+      isActive: Boolean(row.is_active),
+      integrationsAssigned: Number(row.integrations_assigned ?? 0),
+      agentsAssigned: Number(row.agents_assigned ?? 0),
+      joinedAt: String(row.joined_at),
+    }));
   },
 
   createCompany: async (body: {
@@ -366,5 +383,150 @@ export const adminApi = {
         assignable: Boolean(row.assignable),
       })
     );
+  },
+
+  getAgents: async () => {
+    const { data } = await api.get<Record<string, unknown>[]>("/api/admin/agents");
+    return data.map(
+      (row): PlatformAgent => ({
+        id: String(row.id),
+        agentKey: String(row.agent_key),
+        name: String(row.name),
+        description: row.description != null ? String(row.description) : null,
+        category: row.category as PlatformAgent["category"],
+        defaultStepOrder: Number(row.default_step_order),
+        isEnabled: Boolean(row.is_enabled),
+        group: row.group != null ? String(row.group) : null,
+        artifact: row.artifact != null ? String(row.artifact) : null,
+      })
+    );
+  },
+
+  updateAgent: async (key: string, patch: { isEnabled?: boolean }) => {
+    const { data } = await api.patch<Record<string, unknown>>(`/api/admin/agents/${key}`, {
+      is_enabled: patch.isEnabled,
+    });
+    return {
+      id: String(data.id),
+      agentKey: String(data.agent_key),
+      name: String(data.name),
+      description: data.description != null ? String(data.description) : null,
+      category: data.category as PlatformAgent["category"],
+      defaultStepOrder: Number(data.default_step_order),
+      isEnabled: Boolean(data.is_enabled),
+      group: data.group != null ? String(data.group) : null,
+      artifact: data.artifact != null ? String(data.artifact) : null,
+    } satisfies PlatformAgent;
+  },
+
+  getCompanyAgentsAccess: async (companyId: string) => {
+    const { data } = await api.get<Record<string, unknown>[]>(
+      `/api/admin/companies/${companyId}/agents-access`
+    );
+    return data.map(
+      (row): CompanyAgentAccess => ({
+        agentKey: String(row.agent_key),
+        name: String(row.name),
+        category: String(row.category),
+        group: row.group != null ? String(row.group) : null,
+        defaultStepOrder: Number(row.default_step_order),
+        isEnabled: Boolean(row.is_enabled),
+        platformEnabled: Boolean(row.platform_enabled),
+        assignable: Boolean(row.assignable),
+      })
+    );
+  },
+
+  updateCompanyAgentsAccess: async (
+    companyId: string,
+    agents: { agentKey: string; isEnabled: boolean }[]
+  ) => {
+    const { data } = await api.put<Record<string, unknown>[]>(
+      `/api/admin/companies/${companyId}/agents-access`,
+      {
+        agents: agents.map((a) => ({
+          agent_key: a.agentKey,
+          is_enabled: a.isEnabled,
+        })),
+      }
+    );
+    return data.map(
+      (row): CompanyAgentAccess => ({
+        agentKey: String(row.agent_key),
+        name: String(row.name),
+        category: String(row.category),
+        group: row.group != null ? String(row.group) : null,
+        defaultStepOrder: Number(row.default_step_order),
+        isEnabled: Boolean(row.is_enabled),
+        platformEnabled: Boolean(row.platform_enabled),
+        assignable: Boolean(row.assignable),
+      })
+    );
+  },
+
+  getWorkspace: async () => {
+    const { data } = await api.get<Record<string, unknown>>("/api/admin/workspace");
+    return {
+      id: String(data.id),
+      name: String(data.name),
+      slug: String(data.slug),
+      status: String(data.status),
+      planName: String(data.plan_name),
+      membersCount: Number(data.members_count ?? 0),
+    };
+  },
+
+  getWorkspaceMembers: async () => {
+    const { data } = await api.get<Record<string, unknown>[]>("/api/admin/workspace/members");
+    return data.map((row) => ({
+      id: String(row.id),
+      userId: String(row.user_id),
+      email: String(row.email),
+      fullName: String(row.full_name),
+      role: String(row.role),
+      isActive: Boolean(row.is_active),
+      joinedAt: String(row.joined_at),
+    }));
+  },
+
+  getUsage: async () => {
+    const { data } = await api.get<Record<string, unknown>>("/api/admin/usage");
+    const totals = data.totals as Record<string, unknown>;
+    const byUser = Array.isArray(data.by_user) ? data.by_user : [];
+    const byProject = Array.isArray(data.by_project) ? data.by_project : [];
+    return {
+      totals: {
+        inputTokens: Number(totals.input_tokens ?? 0),
+        outputTokens: Number(totals.output_tokens ?? 0),
+        totalTokens: Number(totals.total_tokens ?? 0),
+        costUsd: Number(totals.cost_usd ?? 0),
+        events: Number(totals.events ?? 0),
+      },
+      byUser: byUser.map((row) => {
+        const r = row as Record<string, unknown>;
+        return {
+          userId: r.user_id != null ? String(r.user_id) : null,
+          userName: String(r.user_name ?? "Unknown"),
+          userEmail: r.user_email != null ? String(r.user_email) : null,
+          inputTokens: Number(r.input_tokens ?? 0),
+          outputTokens: Number(r.output_tokens ?? 0),
+          totalTokens: Number(r.total_tokens ?? 0),
+          costUsd: Number(r.cost_usd ?? 0),
+          events: Number(r.events ?? 0),
+        };
+      }),
+      byProject: byProject.map((row) => {
+        const r = row as Record<string, unknown>;
+        return {
+          projectId: String(r.project_id),
+          projectName: String(r.project_name ?? "Unknown"),
+          inputTokens: Number(r.input_tokens ?? 0),
+          outputTokens: Number(r.output_tokens ?? 0),
+          totalTokens: Number(r.total_tokens ?? 0),
+          costUsd: Number(r.cost_usd ?? 0),
+          events: Number(r.events ?? 0),
+        };
+      }),
+    };
   },
 };

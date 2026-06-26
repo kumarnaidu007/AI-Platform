@@ -65,6 +65,15 @@ export function DashboardPage() {
           />
           <StatCard label="Total Companies" value={metrics.totalCompanies} subtext={`${metrics.activeCompanies} active tenants`} icon={Building2} />
         </div>
+        <div className="mt-4">
+          <Link
+            to="/admin/teams"
+            className="inline-flex items-center gap-2 rounded-md border bg-card px-4 py-2 text-sm font-medium hover:bg-accent"
+          >
+            <Building2 className="h-4 w-4" />
+            Manage teams & per-team access
+          </Link>
+        </div>
       </div>
 
       {needsAttention.length > 0 && (
@@ -117,15 +126,19 @@ export function DashboardPage() {
 
         <div className="space-y-3">
           <div className="flex items-center justify-between">
-            <h2 className="text-base font-semibold">Recent Companies</h2>
-            <Link to="/admin/companies" className="text-sm text-primary hover:underline">View all</Link>
+            <h2 className="text-base font-semibold">Teams</h2>
+            <Link to="/admin/teams" className="text-sm text-primary hover:underline">
+              View all teams
+            </Link>
           </div>
           {recentCompanies.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No companies yet. Create one from the Companies page.</p>
+            <p className="text-sm text-muted-foreground">
+              No teams yet. Create a team and grant integrations & agents per team.
+            </p>
           ) : (
-            <DataTable headers={["Company", "Plan", "Users", "Status", "Usage"]}>
+            <DataTable headers={["Team", "Plan", "Members", "Status", "Usage"]}>
               {recentCompanies.map((c) => (
-                <TableRow key={c.id} onClick={() => navigate(`/admin/companies/${c.id}`)}>
+                <TableRow key={c.id} onClick={() => navigate(`/admin/teams/${c.id}`)}>
                   <TableCell>
                     <p className="font-medium">{c.name}</p>
                     <p className="text-xs text-muted-foreground">{c.slug}</p>

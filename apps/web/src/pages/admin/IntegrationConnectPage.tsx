@@ -36,11 +36,13 @@ export function IntegrationConnectPage() {
       queryClient.invalidateQueries({ queryKey: ["integration", key] });
       queryClient.invalidateQueries({ queryKey: ["integrations"] });
     },
+    onError: (err: unknown) => setMessage(`Save failed: ${String(err)}`),
   });
 
   const testMutation = useMutation({
     mutationFn: () => adminApi.testIntegration(key!),
-    onSuccess: (res) => setMessage(res.message),
+    onSuccess: (res) => setMessage(res.success ? res.message : `Test failed: ${res.message}`),
+    onError: (err: unknown) => setMessage(`Test failed: ${String(err)}`),
   });
 
   const deleteMutation = useMutation({
@@ -94,21 +96,15 @@ export function IntegrationConnectPage() {
 
       {message && <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">{message}</div>}
 
-      {integration.integrationKey === "teams" && (
+      {(integration.integrationKey === "github" || integration.integrationKey === "jira") && (
         <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-100">
-          <p className="font-medium">Personal & work Microsoft accounts</p>
+          <p className="font-medium">OAuth callback URL</p>
           <p className="mt-2">
-            Use <strong>common</strong> as Tenant ID for personal Microsoft accounts, or your org tenant ID for work only.
+            Register this redirect URI in your {integration.integrationKey === "github" ? "GitHub OAuth App" : "Atlassian developer app"}:
           </p>
-          <p className="mt-2">
-            Redirect URI (required in Azure):{" "}
-            <code className="rounded bg-white/60 px-1 dark:bg-black/30">
-              {import.meta.env.VITE_API_URL || "http://localhost:8000"}/api/oauth/teams/callback
-            </code>
-          </p>
-          <p className="mt-2 text-xs opacity-90">
-            Tip: you can also set TEAMS_CLIENT_ID and TEAMS_CLIENT_SECRET in .env — the API loads them on startup.
-          </p>
+          <code className="mt-2 block rounded bg-white/60 px-2 py-1 dark:bg-black/30">
+            {import.meta.env.VITE_API_URL || "http://localhost:8000"}/api/oauth/{integration.integrationKey}/callback
+          </code>
         </div>
       )}
 
@@ -135,7 +131,11 @@ export function IntegrationConnectPage() {
                 name={field.key}
                 type={field.type === "secret" && !showSecrets[field.key] ? "password" : field.type === "number" ? "number" : "text"}
                 placeholder={field.type === "secret" ? "••••••••••••" : field.default?.toString()}
-                defaultValue={field.type !== "secret" ? field.default?.toString() : undefined}
+                defaultValue={
+                  field.type !== "secret"
+                    ? (integration.configMetadata[field.key]?.toString() ?? field.default?.toString())
+                    : undefined
+                }
                 className="h-10 w-full rounded-md border bg-background px-3 pr-10 text-sm"
               />
               {field.type === "secret" && (

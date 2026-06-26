@@ -2,8 +2,9 @@ import { NavLink, Outlet } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
-  Building2,
-  CreditCard,
+  Bot,
+  Users,
+  BarChart3,
   LayoutDashboard,
   Plug,
   ScrollText,
@@ -22,6 +23,7 @@ type NavItem = { to: string; label: string; icon: LucideIcon; end?: boolean };
 const platformNav: NavItem[] = [
   { to: "/admin/integrations", label: "Integrations", icon: Plug },
   { to: "/admin/platform-services", label: "AI Services", icon: Sparkles },
+  { to: "/admin/agents", label: "AI Agents", icon: Bot },
   { to: "/admin/platform-settings", label: "Platform Settings", icon: Settings },
 ];
 
@@ -32,8 +34,8 @@ const operationsNav: NavItem[] = [
 ];
 
 const tenantsNav: NavItem[] = [
-  { to: "/admin/companies", label: "Companies", icon: Building2 },
-  { to: "/admin/plans", label: "Plans & Limits", icon: CreditCard },
+  { to: "/admin/teams", label: "Teams", icon: Users },
+  { to: "/admin/usage", label: "Token Usage", icon: BarChart3 },
 ];
 
 function NavSection({ title, items }: { title: string; items: NavItem[] }) {
@@ -90,7 +92,7 @@ export function AdminLayout() {
         <nav className="flex-1 space-y-5 overflow-y-auto p-3">
           <NavSection title="Platform" items={platformNav} />
           <NavSection title="Operations" items={operationsNav} />
-          <NavSection title="Tenants" items={tenantsNav} />
+          <NavSection title="Organization" items={tenantsNav} />
         </nav>
 
         <div className="border-t p-4">
