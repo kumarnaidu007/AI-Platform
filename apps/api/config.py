@@ -15,10 +15,10 @@ class Settings(BaseSettings):
     secret_key: str = "change-me-in-production"
     web_base_url: str = "http://localhost:5180"
     api_public_url: str = "http://localhost:8000"
-    teams_mock_mode: bool = False
-    teams_tenant_id: str = "common"
-    teams_client_id: str = ""
-    teams_client_secret: str = ""
+
+    # Optional env fallbacks for LLM keys (platform AI Services is preferred)
+    anthropic_api_key: str = ""
+    openai_api_key: str = ""
 
 
 settings = Settings()

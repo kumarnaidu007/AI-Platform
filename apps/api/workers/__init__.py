@@ -1,1 +1,1 @@
-# Celery workers — phase 2+
+# Celery background workers for pipeline execution
