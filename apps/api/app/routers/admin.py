@@ -5,10 +5,11 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.deps import DbDep, SuperAdminDep, require_super_admin
-from models import AuditEvent, Company, CompanyMember, PipelineRun, Plan, Project, UsageLedger, User
+from models import AuditEvent, Workspace, WorkspaceMember, PipelineRun, Plan, Project, UsageLedger, User
+from models.workspace_portal import MemberIntegrationAccess
 from models.platform import (
-    CompanyPlatformIntegration,
-    CompanyPlatformService,
+    WorkspacePlatformIntegration,
+    WorkspacePlatformService,
     PlanPlatformIntegration,
     PlatformIntegration,
     PlatformService,
@@ -36,10 +37,11 @@ from schemas.admin import (
     PlatformSettingsUpdate,
     PlatformStatsResponse,
 )
-from services.company_access import create_company_admin, get_company_admin, provision_company_access, set_company_email_domain
+from services.workspace_access import create_team_lead_user, get_team_lead_user, provision_workspace_access, set_workspace_email_domain
 from services.platform_helpers import (
     integration_is_assignable,
     integration_to_dict,
+    oauth_credentials_configured,
     save_connection,
     service_is_assignable,
     service_to_dict,
@@ -148,12 +150,11 @@ def test_integration_connection(key: str, db: DbDep):
     if not conn or not conn.encrypted_config_ref:
         return ConnectionTestResponse(success=False, message="No connection configured")
 
-    secrets = decrypt_secrets(conn.encrypted_config_ref)
-    success = bool(secrets or conn.config_metadata_json)
+    success = oauth_credentials_configured(conn)
     conn.last_tested_at = datetime.now(UTC)
     conn.last_test_status = success
     conn.status = "connected" if success else "error"
-    conn.last_error_message = None if success else "Missing required credentials"
+    conn.last_error_message = None if success else "Missing OAuth client ID or client secret"
     db.commit()
     return ConnectionTestResponse(
         success=success,
@@ -175,7 +176,9 @@ def update_platform_service(service_key: str, body: PlatformServiceUpdate, db: D
     if body.is_enabled is not None:
         service.is_enabled = body.is_enabled
     if body.config_metadata is not None:
-        service.config_metadata_json = body.config_metadata
+        existing = dict(service.config_metadata_json or {})
+        existing.update(body.config_metadata)
+        service.config_metadata_json = existing
     if body.api_key:
         service.encrypted_config_ref = encrypt_secrets({"api_key": body.api_key})
     service.updated_at = datetime.now(UTC)
@@ -186,10 +189,34 @@ def update_platform_service(service_key: str, body: PlatformServiceUpdate, db: D
 
 @router.post("/platform-services/{service_key}/test", response_model=ConnectionTestResponse)
 def test_platform_service(service_key: str, db: DbDep):
+    from services.platform_helpers import foundry_service_configured, get_foundry_config_from_service
+
     service = db.query(PlatformService).filter(PlatformService.service_key == service_key).first()
     if not service:
         raise HTTPException(404, "Service not found")
-    if not service.encrypted_config_ref:
+    if service_key == "azure_foundry":
+        if not foundry_service_configured(service):
+            return ConnectionTestResponse(
+                success=False,
+                message="Configure API key, project endpoint, and deployment name",
+            )
+        config = get_foundry_config_from_service(service)
+        try:
+            from services.llm import test_foundry_connection
+
+            message = test_foundry_connection(config)
+        except Exception as exc:
+            service.last_tested_at = datetime.now(UTC)
+            service.last_test_status = False
+            service.last_error_message = str(exc)
+            db.commit()
+            return ConnectionTestResponse(success=False, message=f"Foundry connection failed: {exc}")
+        service.last_tested_at = datetime.now(UTC)
+        service.last_test_status = True
+        service.last_error_message = None
+        db.commit()
+        return ConnectionTestResponse(success=True, message=message)
+    elif not service.encrypted_config_ref:
         return ConnectionTestResponse(success=False, message="API key not configured")
     service.last_tested_at = datetime.now(UTC)
     service.last_test_status = True
@@ -221,7 +248,7 @@ def list_plans(db: DbDep):
     plans = db.query(Plan).order_by(Plan.name).all()
     result = []
     for plan in plans:
-        companies_count = db.query(func.count(Company.id)).filter(Company.plan_id == plan.id).scalar() or 0
+        companies_count = db.query(func.count(Workspace.id)).filter(Workspace.plan_id == plan.id).scalar() or 0
         integration_keys = [
             row[0]
             for row in db.query(PlatformIntegration.integration_key)
@@ -244,56 +271,110 @@ def list_plans(db: DbDep):
     return result
 
 
-def _company_response(db: Session, company: Company) -> CompanyResponse:
-    plan = db.query(Plan).filter(Plan.id == company.plan_id).first()
+def _company_response(db: Session, workspace: Workspace) -> CompanyResponse:
+    plan = db.query(Plan).filter(Plan.id == workspace.plan_id).first()
     users_count = (
-        db.query(func.count(CompanyMember.id)).filter(CompanyMember.company_id == company.id).scalar() or 0
+        db.query(func.count(WorkspaceMember.id)).filter(WorkspaceMember.workspace_id == workspace.id).scalar() or 0
     )
-    projects_count = db.query(func.count(Project.id)).filter(Project.company_id == company.id).scalar() or 0
+    projects_count = db.query(func.count(Project.id)).filter(Project.workspace_id == workspace.id).scalar() or 0
     active_pipelines = (
         db.query(func.count(PipelineRun.id))
         .join(Project, Project.id == PipelineRun.project_id)
-        .filter(Project.company_id == company.id, PipelineRun.status == "running")
+        .filter(Project.workspace_id == workspace.id, PipelineRun.status == "running")
         .scalar()
         or 0
     )
     usage = (
         db.query(func.coalesce(func.sum(UsageLedger.cost_usd), 0))
-        .filter(UsageLedger.company_id == company.id)
+        .filter(UsageLedger.workspace_id == workspace.id)
         .scalar()
         or 0
     )
     return CompanyResponse(
-        id=company.id,
-        name=company.name,
-        slug=company.slug,
-        status=company.status,
-        plan_id=company.plan_id,
+        id=workspace.id,
+        name=workspace.name,
+        slug=workspace.slug,
+        status=workspace.status,
+        plan_id=workspace.plan_id,
         plan_name=plan.name if plan else "Unknown",
         users_count=users_count,
         projects_count=projects_count,
         active_pipelines=active_pipelines,
         monthly_usage_usd=float(usage),
-        created_at=company.created_at,
+        created_at=workspace.created_at,
     )
 
 
 @router.get("/companies", response_model=list[CompanyResponse])
 def list_companies(db: DbDep):
-    companies = db.query(Company).order_by(Company.created_at.desc()).all()
+    companies = db.query(Workspace).order_by(Workspace.created_at.desc()).all()
     return [_company_response(db, c) for c in companies]
 
 
-@router.get("/companies/{company_id}", response_model=CompanyDetailResponse)
-def get_company(company_id: str, db: DbDep):
-    company = db.query(Company).filter(Company.id == company_id).first()
-    if not company:
-        raise HTTPException(404, "Company not found")
-    base = _company_response(db, company)
-    admin = get_company_admin(db, company.id)
+@router.get("/companies/{workspace_id}/members")
+def list_company_members(workspace_id: str, db: DbDep):
+    workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+    if not workspace:
+        raise HTTPException(404, "Team not found")
+    members = (
+        db.query(WorkspaceMember)
+        .filter(WorkspaceMember.workspace_id == workspace.id)
+        .order_by(WorkspaceMember.joined_at.asc())
+        .all()
+    )
+    result = []
+    for member in members:
+        user = db.query(User).filter(User.id == member.user_id).first()
+        if not user:
+            continue
+        integrations_assigned = (
+            db.query(func.count(MemberIntegrationAccess.platform_integration_id))
+            .filter(
+                MemberIntegrationAccess.workspace_id == workspace.id,
+                MemberIntegrationAccess.user_id == member.user_id,
+                MemberIntegrationAccess.is_enabled.is_(True),
+            )
+            .scalar()
+            or 0
+        )
+        from models.agents import MemberAgentAccess
+
+        agents_assigned = (
+            db.query(func.count(MemberAgentAccess.platform_agent_id))
+            .filter(
+                MemberAgentAccess.workspace_id == workspace.id,
+                MemberAgentAccess.user_id == member.user_id,
+                MemberAgentAccess.is_enabled.is_(True),
+            )
+            .scalar()
+            or 0
+        )
+        result.append(
+            {
+                "id": str(member.id),
+                "user_id": str(member.user_id),
+                "email": user.email,
+                "full_name": user.full_name,
+                "role": member.role,
+                "is_active": user.is_active,
+                "integrations_assigned": integrations_assigned,
+                "agents_assigned": agents_assigned,
+                "joined_at": member.joined_at.isoformat(),
+            }
+        )
+    return result
+
+
+@router.get("/companies/{workspace_id}", response_model=CompanyDetailResponse)
+def get_company(workspace_id: str, db: DbDep):
+    workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+    if not workspace:
+        raise HTTPException(404, "Workspace not found")
+    base = _company_response(db , workspace)
+    admin = get_team_lead_user(db, workspace.id)
     projects = (
         db.query(Project)
-        .filter(Project.company_id == company.id)
+        .filter(Project.workspace_id == workspace.id)
         .order_by(Project.created_at.desc())
         .limit(5)
         .all()
@@ -318,7 +399,7 @@ def get_company(company_id: str, db: DbDep):
 
 @router.post("/companies", response_model=CompanyResponse, status_code=201)
 def create_company(body: CompanyCreateRequest, db: DbDep, _: SuperAdminDep):
-    if db.query(Company).filter(Company.slug == body.slug).first():
+    if db.query(Workspace).filter(Workspace.slug == body.slug).first():
         raise HTTPException(400, "Slug already exists")
     plan = db.query(Plan).filter(Plan.id == body.plan_id).first()
     if not plan:
@@ -327,46 +408,47 @@ def create_company(body: CompanyCreateRequest, db: DbDep, _: SuperAdminDep):
     if body.admin_email and not body.admin_password:
         raise HTTPException(400, "Admin password required when admin email is provided")
 
-    company = Company(name=body.name, slug=body.slug, status=body.status, plan_id=body.plan_id)
-    db.add(company)
+    workspace = Workspace(name=body.name, slug=body.slug, status=body.status, plan_id=body.plan_id)
+    db.add(workspace)
     db.flush()
 
-    provision_company_access(db, company)
+    provision_workspace_access(db, workspace)
+    provision_workspace_agents(db, workspace)
 
     if body.email_domain:
         try:
-            set_company_email_domain(db, company, body.email_domain)
+            set_workspace_email_domain(db, workspace, body.email_domain)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
     if body.admin_email and body.admin_name and body.admin_password:
         try:
-            create_company_admin(
+            create_team_lead_user(
                 db,
-                company,
+                workspace,
                 admin_name=body.admin_name,
                 admin_email=body.admin_email,
                 admin_password=body.admin_password,
-                email_domain=company.settings.email_domain if company.settings else body.email_domain,
+                email_domain=workspace.settings.email_domain if workspace.settings else body.email_domain,
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
     db.commit()
-    db.refresh(company)
-    return _company_response(db, company)
+    db.refresh(workspace)
+    return _company_response(db, workspace)
 
 
-@router.get("/companies/{company_id}/integrations-access", response_model=list[CompanyIntegrationAccessItem])
-def get_company_integrations_access(company_id: str, db: DbDep):
-    company = db.query(Company).filter(Company.id == company_id).first()
-    if not company:
-        raise HTTPException(404, "Company not found")
+@router.get("/companies/{workspace_id}/integrations-access", response_model=list[CompanyIntegrationAccessItem])
+def get_workspace_integrations_access(workspace_id: str, db: DbDep):
+    workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+    if not workspace:
+        raise HTTPException(404, "Workspace not found")
 
     access_map = {
         row.platform_integration_id: row.is_enabled
-        for row in db.query(CompanyPlatformIntegration)
-        .filter(CompanyPlatformIntegration.company_id == company.id)
+        for row in db.query(WorkspacePlatformIntegration)
+        .filter(WorkspacePlatformIntegration.workspace_id == workspace.id)
         .all()
     }
     integrations = (
@@ -396,11 +478,11 @@ def get_company_integrations_access(company_id: str, db: DbDep):
     return items
 
 
-@router.put("/companies/{company_id}/integrations-access", response_model=list[CompanyIntegrationAccessItem])
-def update_company_integrations_access(company_id: str, body: CompanyIntegrationsAccessUpdate, db: DbDep):
-    company = db.query(Company).filter(Company.id == company_id).first()
-    if not company:
-        raise HTTPException(404, "Company not found")
+@router.put("/companies/{workspace_id}/integrations-access", response_model=list[CompanyIntegrationAccessItem])
+def update_workspace_integrations_access(workspace_id: str, body: CompanyIntegrationsAccessUpdate, db: DbDep):
+    workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+    if not workspace:
+        raise HTTPException(404, "Workspace not found")
 
     integrations = (
         db.query(PlatformIntegration)
@@ -420,10 +502,10 @@ def update_company_integrations_access(company_id: str, body: CompanyIntegration
             )
 
         row = (
-            db.query(CompanyPlatformIntegration)
+            db.query(WorkspacePlatformIntegration)
             .filter(
-                CompanyPlatformIntegration.company_id == company.id,
-                CompanyPlatformIntegration.platform_integration_id == integration.id,
+                WorkspacePlatformIntegration.workspace_id == workspace.id,
+                WorkspacePlatformIntegration.platform_integration_id == integration.id,
             )
             .first()
         )
@@ -432,8 +514,8 @@ def update_company_integrations_access(company_id: str, body: CompanyIntegration
                 row.is_enabled = True
             else:
                 db.add(
-                    CompanyPlatformIntegration(
-                        company_id=company.id,
+                    WorkspacePlatformIntegration(
+                        workspace_id=workspace.id,
                         platform_integration_id=integration.id,
                         is_enabled=True,
                     )
@@ -442,19 +524,19 @@ def update_company_integrations_access(company_id: str, body: CompanyIntegration
             row.is_enabled = False
 
     db.commit()
-    return get_company_integrations_access(company_id, db)
+    return get_workspace_integrations_access(workspace_id, db)
 
 
-@router.get("/companies/{company_id}/services-access", response_model=list[CompanyServiceAccessItem])
-def get_company_services_access(company_id: str, db: DbDep):
-    company = db.query(Company).filter(Company.id == company_id).first()
-    if not company:
-        raise HTTPException(404, "Company not found")
+@router.get("/companies/{workspace_id}/services-access", response_model=list[CompanyServiceAccessItem])
+def get_company_services_access(workspace_id: str, db: DbDep):
+    workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+    if not workspace:
+        raise HTTPException(404, "Workspace not found")
 
     access_map = {
         row.platform_service_id: row.is_enabled
-        for row in db.query(CompanyPlatformService)
-        .filter(CompanyPlatformService.company_id == company.id)
+        for row in db.query(WorkspacePlatformService)
+        .filter(WorkspacePlatformService.workspace_id == workspace.id)
         .all()
     }
     services = db.query(PlatformService).order_by(PlatformService.display_name).all()
@@ -476,11 +558,11 @@ def get_company_services_access(company_id: str, db: DbDep):
     return items
 
 
-@router.put("/companies/{company_id}/services-access", response_model=list[CompanyServiceAccessItem])
-def update_company_services_access(company_id: str, body: CompanyServicesAccessUpdate, db: DbDep):
-    company = db.query(Company).filter(Company.id == company_id).first()
-    if not company:
-        raise HTTPException(404, "Company not found")
+@router.put("/companies/{workspace_id}/services-access", response_model=list[CompanyServiceAccessItem])
+def update_company_services_access(workspace_id: str, body: CompanyServicesAccessUpdate, db: DbDep):
+    workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+    if not workspace:
+        raise HTTPException(404, "Workspace not found")
 
     services = db.query(PlatformService).all()
     key_to_service = {s.service_key: s for s in services}
@@ -496,10 +578,10 @@ def update_company_services_access(company_id: str, body: CompanyServicesAccessU
             )
 
         row = (
-            db.query(CompanyPlatformService)
+            db.query(WorkspacePlatformService)
             .filter(
-                CompanyPlatformService.company_id == company.id,
-                CompanyPlatformService.platform_service_id == service.id,
+                WorkspacePlatformService.workspace_id == workspace.id,
+                WorkspacePlatformService.platform_service_id == service.id,
             )
             .first()
         )
@@ -508,8 +590,8 @@ def update_company_services_access(company_id: str, body: CompanyServicesAccessU
                 row.is_enabled = True
             else:
                 db.add(
-                    CompanyPlatformService(
-                        company_id=company.id,
+                    WorkspacePlatformService(
+                        workspace_id=workspace.id,
                         platform_service_id=service.id,
                         is_enabled=True,
                     )
@@ -518,24 +600,24 @@ def update_company_services_access(company_id: str, body: CompanyServicesAccessU
             row.is_enabled = False
 
     db.commit()
-    return get_company_services_access(company_id, db)
+    return get_company_services_access(workspace_id, db)
 
 
-@router.patch("/companies/{company_id}", response_model=CompanyResponse)
-def update_company(company_id: str, body: CompanyUpdateRequest, db: DbDep):
-    company = db.query(Company).filter(Company.id == company_id).first()
-    if not company:
-        raise HTTPException(404, "Company not found")
+@router.patch("/companies/{workspace_id}", response_model=CompanyResponse)
+def update_company(workspace_id: str, body: CompanyUpdateRequest, db: DbDep):
+    workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+    if not workspace:
+        raise HTTPException(404, "Workspace not found")
     if body.name is not None:
-        company.name = body.name
+        workspace.name = body.name
     if body.status is not None:
-        company.status = body.status
+        workspace.status = body.status
     if body.plan_id is not None:
-        company.plan_id = body.plan_id
-    company.updated_at = datetime.now(UTC)
+        workspace.plan_id = body.plan_id
+    Workspace.updated_at = datetime.now(UTC)
     db.commit()
-    db.refresh(company)
-    return _company_response(db, company)
+    db.refresh(workspace)
+    return _company_response(db , workspace)
 
 
 @router.get("/dashboard", response_model=DashboardMetricsResponse)
@@ -568,10 +650,10 @@ def get_dashboard(db: DbDep):
         total_services=len(services),
     )
 
-    total_companies = db.query(func.count(Company.id)).scalar() or 0
-    active_companies = db.query(func.count(Company.id)).filter(Company.status == "active").scalar() or 0
-    trial_companies = db.query(func.count(Company.id)).filter(Company.status == "trial").scalar() or 0
-    suspended_companies = db.query(func.count(Company.id)).filter(Company.status == "suspended").scalar() or 0
+    total_companies = db.query(func.count(Workspace.id)).scalar() or 0
+    active_companies = db.query(func.count(Workspace.id)).filter(Workspace.status == "active").scalar() or 0
+    trial_companies = db.query(func.count(Workspace.id)).filter(Workspace.status == "trial").scalar() or 0
+    suspended_companies = db.query(func.count(Workspace.id)).filter(Workspace.status == "suspended").scalar() or 0
     active_pipelines = db.query(func.count(PipelineRun.id)).filter(PipelineRun.status == "running").scalar() or 0
     monthly_cost = float(db.query(func.coalesce(func.sum(UsageLedger.cost_usd), 0)).scalar() or 0)
     token_sum = db.query(func.coalesce(func.sum(UsageLedger.input_tokens + UsageLedger.output_tokens), 0)).scalar() or 0
@@ -592,9 +674,9 @@ def get_dashboard(db: DbDep):
 @router.get("/dashboard/pipeline-activity", response_model=list[PipelineActivityItem])
 def get_pipeline_activity(db: DbDep):
     runs = (
-        db.query(PipelineRun, Project, Company)
+        db.query(PipelineRun, Project, Workspace)
         .join(Project, Project.id == PipelineRun.project_id)
-        .join(Company, Company.id == Project.company_id)
+        .join(Workspace, Workspace.id == Project.workspace_id)
         .order_by(PipelineRun.created_at.desc())
         .limit(10)
         .all()
@@ -602,13 +684,13 @@ def get_pipeline_activity(db: DbDep):
     return [
         PipelineActivityItem(
             id=str(run.id),
-            company_name=company.name,
+            company_name=workspace.name,
             project_name=project.name,
             step=run.current_step or "pending",
             status=run.status,
             started_at=run.started_at,
         )
-        for run, project, company in runs
+        for run, project, Workspace in runs
     ]
 
 
@@ -618,7 +700,7 @@ def list_audit_log(db: DbDep):
     result = []
     for e in events:
         user = db.query(User).filter(User.id == e.user_id).first() if e.user_id else None
-        company = db.query(Company).filter(Company.id == e.company_id).first() if e.company_id else None
+        workspace = db.query(Workspace).filter(Workspace.id == e.workspace_id).first() if e.workspace_id else None
         meta = e.metadata_json or {}
         result.append(
             {
@@ -628,7 +710,7 @@ def list_audit_log(db: DbDep):
                 "action": e.action,
                 "resource_type": e.resource_type,
                 "resource_name": meta.get("name", e.resource_type),
-                "company_name": company.name if company else None,
+                "company_name": workspace.name if workspace else None,
                 "ip_address": str(e.ip_address) if e.ip_address else None,
             }
         )
@@ -680,6 +762,66 @@ def system_health(db: DbDep):
         "down": down,
         "services": svc_status,
         "queue": {"active_workers": 0, "queue_depth": 0, "tasks_per_min": 0, "failed_1h": 0},
+    }
+
+
+from services.workspace_helpers import get_default_workspace, require_default_workspace
+
+
+@router.get("/workspace")
+def get_workspace(db: DbDep, _user: SuperAdminDep):
+    workspace = require_default_workspace(db)
+    members_count = (
+        db.query(func.count(WorkspaceMember.id)).filter(WorkspaceMember.workspace_id == workspace.id).scalar() or 0
+    )
+    return {
+        "id": str(workspace.id),
+        "name" : workspace.name,
+        "slug" : workspace.slug,
+        "status" : workspace.status,
+        "plan_name" : workspace.plan.name if workspace.plan else "",
+        "members_count": members_count,
+    }
+
+
+@router.get("/workspace/members")
+def list_workspace_members(db: DbDep, _user: SuperAdminDep):
+    workspace = require_default_workspace(db)
+    members = (
+        db.query(WorkspaceMember)
+        .filter(WorkspaceMember.workspace_id == workspace.id)
+        .order_by(WorkspaceMember.joined_at.asc())
+        .all()
+    )
+    result = []
+    for member in members:
+        user = db.query(User).filter(User.id == member.user_id).first()
+        if not user:
+            continue
+        result.append(
+            {
+                "id": str(member.id),
+                "user_id": str(member.user_id),
+                "email": user.email,
+                "full_name": user.full_name,
+                "role": member.role,
+                "is_active": user.is_active,
+                "joined_at": member.joined_at.isoformat(),
+            }
+        )
+    return result
+
+
+@router.get("/usage")
+def get_usage_summary(db: DbDep, _user: SuperAdminDep):
+    from services.usage_service import usage_summary_by_project, usage_summary_by_user, usage_totals
+    from services.workspace_helpers import require_default_workspace
+
+    workspace = require_default_workspace(db)
+    return {
+        "totals": usage_totals(db, workspace.id),
+        "by_user": usage_summary_by_user(db, workspace.id),
+        "by_project": usage_summary_by_project(db, workspace.id),
     }
 
 
