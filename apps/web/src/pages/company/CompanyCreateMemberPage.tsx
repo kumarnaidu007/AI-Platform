@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
+import { isTeamLead } from "@/types/roles";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ArrowLeft } from "lucide-react";
 import { PageHeader } from "@/components/admin/PageHeader";
@@ -8,7 +9,7 @@ import { companyApi } from "@/services/companyApi";
 import { useAuth } from "@/context/AuthContext";
 
 export function CompanyCreateMemberPage() {
-  const { slug } = useParams<{ slug: string }>();
+  useParams<{ slug: string }>();
   const { company } = useAuth();
   const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
@@ -16,7 +17,7 @@ export function CompanyCreateMemberPage() {
   const settingsQuery = useQuery({
     queryKey: ["company-settings"],
     queryFn: companyApi.getSettings,
-    enabled: company?.role === "admin",
+    enabled: isTeamLead(company?.role),
   });
 
   const createMutation = useMutation({
@@ -28,7 +29,7 @@ export function CompanyCreateMemberPage() {
         role: String(form.get("role") || "member"),
       }),
     onSuccess: (member) => {
-      navigate(`/c/${slug}/team/${member.id}`);
+      navigate(`/workspace/team/${member.id}`);
     },
     onError: (err: unknown) => {
       const msg =
@@ -42,8 +43,8 @@ export function CompanyCreateMemberPage() {
     },
   });
 
-  if (company?.role !== "admin") {
-    return <Navigate to={`/c/${slug}`} replace />;
+  if (!isTeamLead(company?.role)) {
+    return <Navigate to={`/workspace`} replace />;
   }
 
   if (settingsQuery.isLoading) return <LoadingState />;
@@ -53,7 +54,7 @@ export function CompanyCreateMemberPage() {
   return (
     <div className="mx-auto max-w-lg space-y-6">
       <Link
-        to={`/c/${slug}/team`}
+        to={`/workspace/team`}
         className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-4 w-4" />
@@ -72,7 +73,7 @@ export function CompanyCreateMemberPage() {
       {!emailDomain && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
           Set your company email domain first under{" "}
-          <Link to={`/c/${slug}/settings`} className="font-medium text-primary hover:underline">
+          <Link to={`/workspace/settings`} className="font-medium text-primary hover:underline">
             Settings
           </Link>
           .
@@ -144,9 +145,8 @@ export function CompanyCreateMemberPage() {
             disabled={!emailDomain}
             className="mt-1.5 h-10 w-full rounded-md border bg-background px-3 text-sm disabled:opacity-50"
           >
-            <option value="member">Member</option>
-            <option value="admin">Admin</option>
-            <option value="viewer">Viewer</option>
+            <option value="team_member">Team Member</option>
+            <option value="team_lead">Team Lead</option>
           </select>
         </div>
         <div className="flex gap-3 border-t pt-4">
@@ -158,7 +158,7 @@ export function CompanyCreateMemberPage() {
             {createMutation.isPending ? "Creating..." : "Create employee"}
           </button>
           <Link
-            to={`/c/${slug}/team`}
+            to={`/workspace/team`}
             className="rounded-md border px-4 py-2 text-sm font-medium hover:bg-accent"
           >
             Cancel

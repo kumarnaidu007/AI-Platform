@@ -1,4 +1,5 @@
 import { Link, useParams } from "react-router-dom";
+import { isTeamLead } from "@/types/roles";
 import { useQuery } from "@tanstack/react-query";
 import { FolderKanban, Plug, Sparkles, Users } from "lucide-react";
 import { PageHeader } from "@/components/admin/PageHeader";
@@ -8,9 +9,9 @@ import { companyApi } from "@/services/companyApi";
 import { useAuth } from "@/context/AuthContext";
 
 export function CompanyDashboardPage() {
-  const { slug } = useParams<{ slug: string }>();
+  useParams<{ slug: string }>();
   const { company } = useAuth();
-  const isAdmin = company?.role === "admin";
+  const isAdmin = isTeamLead(company?.role);
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["company-dashboard"],
@@ -34,7 +35,7 @@ export function CompanyDashboardPage() {
       {needsDomain && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
           Complete setup: configure your company email domain in{" "}
-          <Link to={`/c/${slug}/settings`} className="font-medium text-primary hover:underline">
+          <Link to={`/workspace/settings`} className="font-medium text-primary hover:underline">
             Settings
           </Link>{" "}
           before adding employees. Only @{`yourcompany.com`} addresses will be allowed to sign in.
@@ -57,13 +58,13 @@ export function CompanyDashboardPage() {
           {isAdmin && (
             <>
               <li>
-                <Link to={`/c/${slug}/settings`} className="text-primary hover:underline">
+                <Link to={`/workspace/settings`} className="text-primary hover:underline">
                   Set company email domain
                 </Link>{" "}
                 — only @{data?.emailDomain || "yourcompany.com"} accounts can join
               </li>
               <li>
-                <Link to={`/c/${slug}/team`} className="text-primary hover:underline">
+                <Link to={`/workspace/team`} className="text-primary hover:underline">
                   Add team members
                 </Link>{" "}
                 — create employee logins and assign integrations
@@ -71,7 +72,7 @@ export function CompanyDashboardPage() {
             </>
           )}
           <li>
-            <Link to={`/c/${slug}/integrations`} className="text-primary hover:underline">
+            <Link to={`/workspace/integrations`} className="text-primary hover:underline">
               Connect your integrations
             </Link>{" "}
             — use your personal credentials for assigned tools

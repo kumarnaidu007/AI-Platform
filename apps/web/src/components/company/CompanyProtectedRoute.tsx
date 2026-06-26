@@ -1,10 +1,10 @@
-import { Navigate, Outlet, useParams } from "react-router-dom";
+import { Navigate, Outlet } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { LoadingState } from "@/components/admin/LoadingState";
 
 export function CompanyProtectedRoute() {
-  const { slug } = useParams<{ slug: string }>();
-  const { portal, company, isLoading } = useAuth();
+  const { portal, workspace, company, isLoading } = useAuth();
+  const ctx = workspace ?? company;
 
   if (isLoading) {
     return (
@@ -14,8 +14,8 @@ export function CompanyProtectedRoute() {
     );
   }
 
-  if (portal !== "company" || !company || company.slug !== slug) {
-    return <Navigate to={`/c/${slug}/login`} replace />;
+  if ((portal !== "workspace" && portal !== "company") || !ctx) {
+    return <Navigate to="/workspace/login" replace />;
   }
 
   return <Outlet />;

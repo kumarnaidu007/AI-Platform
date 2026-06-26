@@ -1,4 +1,5 @@
 import { Link, useParams } from "react-router-dom";
+import { isTeamLead } from "@/types/roles";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronRight } from "lucide-react";
 import { PageHeader } from "@/components/admin/PageHeader";
@@ -10,9 +11,9 @@ import { useAuth } from "@/context/AuthContext";
 import { categoryLabels } from "@/types/platform";
 
 export function CompanyIntegrationsPage() {
-  const { slug } = useParams<{ slug: string }>();
+  useParams<{ slug: string }>();
   const { company } = useAuth();
-  const isAdmin = company?.role === "admin";
+  const isAdmin = isTeamLead(company?.role);
 
   const catalogQuery = useQuery({
     queryKey: ["company-integration-catalog"],
@@ -69,7 +70,7 @@ export function CompanyIntegrationsPage() {
                 <div className="flex shrink-0 items-center gap-3">
                   <ConnectionStatusBadge status={item.connectionStatus} />
                   <Link
-                    to={`/c/${slug}/integrations/${item.integrationKey}`}
+                    to={`/workspace/integrations/${item.integrationKey}`}
                     className="inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline"
                   >
                     {item.isConnected ? "Manage" : "Connect"}
@@ -87,7 +88,7 @@ export function CompanyIntegrationsPage() {
           <h2 className="text-sm font-semibold">Granted to your company</h2>
           <p className="text-sm text-muted-foreground">
             These integrations are available for assignment. Go to{" "}
-            <Link to={`/c/${slug}/team`} className="text-primary hover:underline">
+            <Link to={`/workspace/team`} className="text-primary hover:underline">
               Team
             </Link>{" "}
             to assign them to employees — they will connect with their own accounts.

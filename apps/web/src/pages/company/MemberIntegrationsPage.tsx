@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { Link, Navigate, useParams } from "react-router-dom";
+import { isTeamLead } from "@/types/roles";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Save } from "lucide-react";
+import { ArrowLeft, Bot, Save } from "lucide-react";
 import { PageHeader } from "@/components/admin/PageHeader";
 import { LoadingState, ErrorState } from "@/components/admin/LoadingState";
 import { companyApi } from "@/services/companyApi";
@@ -9,14 +10,14 @@ import { useAuth } from "@/context/AuthContext";
 import { categoryLabels } from "@/types/platform";
 
 export function MemberIntegrationsPage() {
-  const { slug, memberId } = useParams<{ slug: string; memberId: string }>();
+  const { memberId } = useParams<{ slug: string; memberId: string }>();
   const { company } = useAuth();
   const queryClient = useQueryClient();
   const [message, setMessage] = useState<string | null>(null);
   const [assignments, setAssignments] = useState<Record<string, boolean>>({});
 
-  if (company?.role !== "admin") {
-    return <Navigate to={`/c/${slug}`} replace />;
+  if (!isTeamLead(company?.role)) {
+    return <Navigate to={`/workspace`} replace />;
   }
 
   const memberQuery = useQuery({
@@ -74,7 +75,7 @@ export function MemberIntegrationsPage() {
   return (
     <div className="mx-auto max-w-3xl space-y-6">
       <Link
-        to={`/c/${slug}/team`}
+        to={`/workspace/team`}
         className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-4 w-4" />
@@ -84,6 +85,15 @@ export function MemberIntegrationsPage() {
       <PageHeader
         title={member.fullName}
         description={member.email}
+        actions={
+          <Link
+            to={`/workspace/team/${memberId}/agents`}
+            className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium hover:bg-accent"
+          >
+            <Bot className="h-4 w-4" />
+            Manage agents
+          </Link>
+        }
       />
 
       <div className="grid gap-4 sm:grid-cols-2">
@@ -97,9 +107,8 @@ export function MemberIntegrationsPage() {
             onChange={(e) => roleMutation.mutate(e.target.value)}
             className="mt-2 h-10 w-full rounded-md border bg-background px-3 text-sm"
           >
-            <option value="member">Member</option>
-            <option value="admin">Admin</option>
-            <option value="viewer">Viewer</option>
+            <option value="team_member">Team Member</option>
+            <option value="team_lead">Team Lead</option>
           </select>
         </div>
         <div className="rounded-lg border bg-card p-4">
@@ -144,9 +153,13 @@ export function MemberIntegrationsPage() {
         )}
 
         {integrations.length === 0 ? (
-          <p className="mt-6 text-sm text-muted-foreground">
-            No integrations granted to your company by the platform administrator.
-          </p>
+          <div className="mt-6 rounded-lg border border-dashed bg-muted/30 p-6 text-sm">
+            <p className="font-medium text-foreground">No integrations available to assign</p>
+            <p className="mt-2 text-muted-foreground">
+              The platform administrator must grant integrations to your team first (Super Admin → Teams → your team).
+              Then you can assign them here.
+            </p>
+          </div>
         ) : (
           <div className="mt-6 space-y-2">
             {integrations.map((item) => {

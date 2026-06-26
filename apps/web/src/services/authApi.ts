@@ -4,7 +4,7 @@ const API_BASE = import.meta.env.VITE_API_URL ?? "";
 
 export const SESSION_KEY = "ai_dev_session";
 
-export type Portal = "admin" | "company";
+export type Portal = "admin" | "workspace" | "company";
 
 export interface AuthUser {
   id: string;
@@ -14,7 +14,7 @@ export interface AuthUser {
   isActive: boolean;
 }
 
-export interface CompanyContext {
+export interface WorkspaceContext {
   id: string;
   name: string;
   slug: string;
@@ -24,11 +24,16 @@ export interface CompanyContext {
   emailDomain: string | null;
 }
 
+/** @deprecated use WorkspaceContext */
+export type CompanyContext = WorkspaceContext;
+
 export interface AuthSession {
   portal: Portal;
   token: string;
   user: AuthUser;
-  company: CompanyContext | null;
+  workspace: WorkspaceContext | null;
+  /** @deprecated use workspace */
+  company: WorkspaceContext | null;
 }
 
 export const api = axios.create({
@@ -40,7 +45,17 @@ export function getStoredSession(): AuthSession | null {
   const raw = localStorage.getItem(SESSION_KEY);
   if (!raw) return null;
   try {
-    return JSON.parse(raw) as AuthSession;
+    const parsed = JSON.parse(raw) as AuthSession;
+    if (!parsed.workspace && parsed.company) {
+      parsed.workspace = parsed.company;
+    }
+    if (!parsed.company && parsed.workspace) {
+      parsed.company = parsed.workspace;
+    }
+    if (parsed.portal === "company") {
+      parsed.portal = "workspace";
+    }
+    return parsed;
   } catch {
     return null;
   }
@@ -48,7 +63,13 @@ export function getStoredSession(): AuthSession | null {
 
 export function setStoredSession(session: AuthSession | null) {
   if (session) {
-    localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+    const normalized: AuthSession = {
+      ...session,
+      portal: session.portal === "company" ? "workspace" : session.portal,
+      workspace: session.workspace ?? session.company,
+      company: session.workspace ?? session.company,
+    };
+    localStorage.setItem(SESSION_KEY, JSON.stringify(normalized));
   } else {
     localStorage.removeItem(SESSION_KEY);
   }
@@ -61,7 +82,9 @@ export function getStoredToken(): string | null {
 api.interceptors.request.use((config) => {
   const url = config.url ?? "";
   const isLogin =
-    url.includes("/api/auth/admin/login") || url.includes("/api/auth/company/login");
+    url.includes("/api/auth/admin/login") ||
+    url.includes("/api/auth/workspace/login") ||
+    url.includes("/api/auth/company/login");
   if (!isLogin) {
     const token = getStoredToken();
     if (token) {
@@ -80,9 +103,9 @@ api.interceptors.response.use(
       const session = getStoredSession();
       setStoredSession(null);
       const path = window.location.pathname;
-      if (session?.portal === "company" && session.company?.slug) {
+      if (session?.portal === "workspace" || session?.portal === "company") {
         if (!path.includes("/login")) {
-          window.location.href = `/c/${session.company.slug}/login`;
+          window.location.href = "/workspace/login";
         }
       } else if (!path.includes("/login")) {
         window.location.href = "/login";
@@ -102,7 +125,7 @@ function mapUser(raw: Record<string, unknown>): AuthUser {
   };
 }
 
-function mapCompany(raw: Record<string, unknown> | null | undefined): CompanyContext | null {
+function mapWorkspace(raw: Record<string, unknown> | null | undefined): WorkspaceContext | null {
   if (!raw) return null;
   return {
     id: String(raw.id),
@@ -116,11 +139,17 @@ function mapCompany(raw: Record<string, unknown> | null | undefined): CompanyCon
 }
 
 function mapTokenResponse(data: Record<string, unknown>): AuthSession {
+  const workspace = mapWorkspace(
+    (data.workspace as Record<string, unknown> | undefined) ??
+      (data.company as Record<string, unknown> | undefined)
+  );
+  const portal = data.portal === "company" ? "workspace" : (data.portal as Portal);
   return {
-    portal: data.portal as Portal,
+    portal,
     token: String(data.access_token),
     user: mapUser(data.user as Record<string, unknown>),
-    company: mapCompany(data.company as Record<string, unknown> | undefined),
+    workspace,
+    company: workspace,
   };
 }
 
@@ -143,13 +172,17 @@ export const authApi = {
     return mapTokenResponse(data);
   },
 
-  companyLogin: async (email: string, password: string, companySlug: string) => {
-    const { data } = await api.post<Record<string, unknown>>("/api/auth/company/login", {
+  workspaceLogin: async (email: string, password: string) => {
+    const { data } = await api.post<Record<string, unknown>>("/api/auth/workspace/login", {
       email,
       password,
-      company_slug: companySlug,
     });
     return mapTokenResponse(data);
+  },
+
+  /** @deprecated use workspaceLogin */
+  companyLogin: async (email: string, password: string, _companySlug?: string) => {
+    return authApi.workspaceLogin(email, password);
   },
 
   logout: async () => {
@@ -160,10 +193,16 @@ export const authApi = {
     const { data } = await api.get<Record<string, unknown>>("/api/auth/me", {
       headers: token ? { Authorization: `Bearer ${token}` } : undefined,
     });
+    const workspace = mapWorkspace(
+      (data.workspace as Record<string, unknown> | undefined) ??
+        (data.company as Record<string, unknown> | undefined)
+    );
+    const portal = data.portal === "company" ? "workspace" : (data.portal as Portal);
     return {
-      portal: data.portal as Portal,
+      portal,
       user: mapUser(data.user as Record<string, unknown>),
-      company: mapCompany(data.company as Record<string, unknown> | undefined),
+      workspace,
+      company: workspace,
     };
   },
 };

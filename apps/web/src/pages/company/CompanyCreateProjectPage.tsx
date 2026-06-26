@@ -2,20 +2,23 @@ import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation } from "@tanstack/react-query";
 import { ArrowLeft } from "lucide-react";
-import { Navigate } from "react-router-dom";
 import { PageHeader } from "@/components/admin/PageHeader";
 import { companyApi } from "@/services/companyApi";
-import { useAuth } from "@/context/AuthContext";
+import { githubApi } from "@/services/githubApi";
+import { getApiErrorMessage } from "@/services/authApi";
 
 export function CompanyCreateProjectPage() {
-  const { slug } = useParams<{ slug: string }>();
-  const { company } = useAuth();
+  useParams<{ slug: string }>();
   const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
+  const [repoUrl, setRepoUrl] = useState("");
+  const [repoMessage, setRepoMessage] = useState<string | null>(null);
 
-  if (company?.role === "viewer") {
-    return <Navigate to={`/c/${slug}/projects`} replace />;
-  }
+  const verifyRepoMutation = useMutation({
+    mutationFn: () => githubApi.verifyRepo(repoUrl),
+    onSuccess: (info) => setRepoMessage(`Repository verified — default branch: ${info.defaultBranch}`),
+    onError: (err: unknown) => setRepoMessage(getApiErrorMessage(err, "Could not verify repository")),
+  });
 
   const createMutation = useMutation({
     mutationFn: (form: FormData) =>
@@ -25,10 +28,10 @@ export function CompanyCreateProjectPage() {
         frontendStack: String(form.get("frontend_stack") || "") || undefined,
         backendStack: String(form.get("backend_stack") || "") || undefined,
         dbType: String(form.get("db_type") || "") || undefined,
-        vcsProvider: String(form.get("vcs_provider") || "") || undefined,
+        vcsProvider: "github",
+        repoUrl: String(form.get("repo_url") || "") || undefined,
         pmTool: String(form.get("pm_tool") || "") || undefined,
-      }),
-    onSuccess: (project) => navigate(`/c/${slug}/projects/${project.id}`),
+      }),    onSuccess: (project) => navigate(`/workspace/projects/${project.id}`),
     onError: (err: unknown) => {
       const msg =
         err && typeof err === "object" && "response" in err
@@ -41,7 +44,7 @@ export function CompanyCreateProjectPage() {
   return (
     <div className="mx-auto max-w-2xl space-y-6">
       <Link
-        to={`/c/${slug}/projects`}
+        to={`/workspace/projects`}
         className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-4 w-4" />
@@ -113,16 +116,33 @@ export function CompanyCreateProjectPage() {
               className="mt-1.5 h-10 w-full rounded-md border bg-background px-3 text-sm"
             />
           </div>
-          <div>
-            <label htmlFor="vcs_provider" className="block text-sm font-medium">
-              VCS provider
+          <div className="sm:col-span-2">
+            <label htmlFor="repo_url" className="block text-sm font-medium">
+              GitHub repository URL
             </label>
-            <input
-              id="vcs_provider"
-              name="vcs_provider"
-              placeholder="github"
-              className="mt-1.5 h-10 w-full rounded-md border bg-background px-3 text-sm"
-            />
+            <div className="mt-1.5 flex gap-2">
+              <input
+                id="repo_url"
+                name="repo_url"
+                value={repoUrl}
+                onChange={(e) => setRepoUrl(e.target.value)}
+                placeholder="https://github.com/org/my-repo"
+                required
+                className="h-10 flex-1 rounded-md border bg-background px-3 text-sm"
+              />
+              <button
+                type="button"
+                disabled={!repoUrl.trim() || verifyRepoMutation.isPending}
+                onClick={() => verifyRepoMutation.mutate()}
+                className="rounded-md border px-3 text-sm font-medium"
+              >
+                Verify
+              </button>
+            </div>
+            {repoMessage && <p className="mt-1 text-xs text-muted-foreground">{repoMessage}</p>}
+            <p className="mt-1 text-xs text-muted-foreground">
+              Connect GitHub under My Integrations first. Agents will branch from develop (or the repo default).
+            </p>
           </div>
         </div>
         <div>

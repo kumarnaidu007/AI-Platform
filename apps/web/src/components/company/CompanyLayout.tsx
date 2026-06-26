@@ -1,33 +1,35 @@
-import { NavLink, Outlet, useNavigate, useParams } from "react-router-dom";
-import { Building2, FolderKanban, LayoutDashboard, LogOut, MessageSquare, Plug, Settings, Sparkles, User, Users } from "lucide-react";
+import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { Bot, FolderKanban, LayoutDashboard, LogOut, Plug, Settings, Sparkles, User, Users } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/context/AuthContext";
+import { formatRole, isTeamLead } from "@/types/roles";
 
-type NavItem = { to: string; label: string; icon: LucideIcon; end?: boolean; adminOnly?: boolean };
+type NavItem = { to: string; label: string; icon: LucideIcon; end?: boolean; teamLeadOnly?: boolean };
 
 export function CompanyLayout() {
-  const { slug } = useParams<{ slug: string }>();
-  const { user, company, logout } = useAuth();
+  const { user, workspace, company, logout } = useAuth();
+  const ctx = workspace ?? company;
   const navigate = useNavigate();
-  const isAdmin = company?.role === "admin";
+  const teamLead = isTeamLead(ctx?.role);
 
   const initials = user?.fullName
     ?.split(" ")
     .map((p) => p[0])
     .join("")
     .slice(0, 2)
-    .toUpperCase() ?? "CO";
+    .toUpperCase() ?? "WS";
 
   const navItems: NavItem[] = [
-    { to: `/c/${slug}`, label: "Dashboard", icon: LayoutDashboard, end: true },
-    { to: `/c/${slug}/projects`, label: "Projects", icon: FolderKanban },
-    { to: `/c/${slug}/integrations`, label: "My Integrations", icon: Plug },
-    { to: `/c/${slug}/teams`, label: "Teams", icon: MessageSquare },
-    { to: `/c/${slug}/services`, label: "AI Services", icon: Sparkles },
-    { to: `/c/${slug}/profile`, label: "Profile", icon: User },
-    { to: `/c/${slug}/team`, label: "Team", icon: Users, adminOnly: true },
-    { to: `/c/${slug}/settings`, label: "Settings", icon: Settings, adminOnly: true },
+    { to: "/workspace", label: "Dashboard", icon: LayoutDashboard, end: true },
+    { to: "/workspace/projects", label: "Projects", icon: FolderKanban },
+    { to: "/workspace/integrations", label: "My Integrations", icon: Plug },
+    { to: "/workspace/my-agents", label: "My Agents", icon: Bot },
+    { to: "/workspace/services", label: "AI Services", icon: Sparkles },
+    { to: "/workspace/profile", label: "Profile", icon: User },
+    { to: "/workspace/team", label: "Team", icon: Users, teamLeadOnly: true },
+    { to: "/workspace/agents", label: "AI Agents", icon: Bot, teamLeadOnly: true },
+    { to: "/workspace/settings", label: "Settings", icon: Settings, teamLeadOnly: true },
   ];
 
   return (
@@ -35,11 +37,11 @@ export function CompanyLayout() {
       <aside className="sticky top-0 flex h-screen w-64 shrink-0 flex-col border-r bg-card">
         <div className="flex h-16 shrink-0 items-center gap-3 border-b px-5">
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary">
-            <Building2 className="h-4 w-4 text-primary-foreground" />
+            <LayoutDashboard className="h-4 w-4 text-primary-foreground" />
           </div>
           <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-semibold leading-tight">{company?.name}</p>
-            <p className="truncate text-xs text-muted-foreground">/{slug}</p>
+            <p className="truncate text-sm font-semibold leading-tight">{ctx?.name ?? "Workspace"}</p>
+            <p className="truncate text-xs text-muted-foreground">AI Dev Platform</p>
           </div>
         </div>
 
@@ -48,7 +50,7 @@ export function CompanyLayout() {
             Workspace
           </p>
           {navItems
-            .filter((item) => !item.adminOnly || isAdmin)
+            .filter((item) => !item.teamLeadOnly || teamLead)
             .map(({ to, label, icon: Icon, end }) => (
               <NavLink
                 key={to}
@@ -76,13 +78,13 @@ export function CompanyLayout() {
             </div>
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium leading-tight">{user?.fullName}</p>
-              <p className="truncate text-xs capitalize text-muted-foreground">{company?.role}</p>
+              <p className="truncate text-xs text-muted-foreground">{formatRole(ctx?.role ?? "")}</p>
             </div>
             <button
               type="button"
               onClick={async () => {
                 await logout();
-                navigate(`/c/${slug}/login`);
+                navigate("/workspace/login");
               }}
               className="shrink-0 rounded-md p-2 text-muted-foreground hover:bg-accent hover:text-foreground"
               aria-label="Sign out"

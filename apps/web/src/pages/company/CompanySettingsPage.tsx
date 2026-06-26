@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Navigate } from "react-router-dom";
+import { isTeamLead } from "@/types/roles";
 import { PageHeader } from "@/components/admin/PageHeader";
 import { LoadingState, ErrorState } from "@/components/admin/LoadingState";
 import { companyApi } from "@/services/companyApi";
@@ -12,8 +13,8 @@ export function CompanySettingsPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  if (company?.role !== "admin") {
-    return <Navigate to={`/c/${company?.slug}`} replace />;
+  if (!isTeamLead(company?.role)) {
+    return <Navigate to="/workspace" replace />;
   }
 
   const { data, isLoading, isError, error: loadError } = useQuery({

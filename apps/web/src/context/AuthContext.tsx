@@ -12,10 +12,13 @@ import {
 interface AuthContextValue {
   session: AuthSession | null;
   user: AuthSession["user"] | null;
+  workspace: CompanyContext | null;
   company: CompanyContext | null;
   portal: Portal | null;
   isLoading: boolean;
   adminLogin: (email: string, password: string) => Promise<void>;
+  workspaceLogin: (email: string, password: string) => Promise<void>;
+  /** @deprecated */
   companyLogin: (email: string, password: string, companySlug: string) => Promise<void>;
   logout: () => Promise<void>;
 }
@@ -39,13 +42,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           portal: me.portal,
           token: stored.token,
           user: me.user,
-          company: me.company,
+          workspace: me.workspace ?? me.company,
+          company: me.workspace ?? me.company,
         });
         setStoredSession({
           portal: me.portal,
           token: stored.token,
           user: me.user,
-          company: me.company,
+          workspace: me.workspace ?? me.company,
+          company: me.workspace ?? me.company,
         });
       })
       .catch(() => {
@@ -62,12 +67,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setSession(next);
   }, []);
 
-  const companyLogin = useCallback(async (email: string, password: string, companySlug: string) => {
+  const workspaceLogin = useCallback(async (email: string, password: string) => {
     setStoredSession(null);
-    const next = await authApi.companyLogin(email.trim(), password, companySlug);
+    const next = await authApi.workspaceLogin(email.trim(), password);
     setStoredSession(next);
     setSession(next);
   }, []);
+
+  const companyLogin = useCallback(async (email: string, password: string, _companySlug: string) => {
+    await workspaceLogin(email, password);
+  }, [workspaceLogin]);
 
   const logout = useCallback(async () => {
     try {
@@ -86,14 +95,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     () => ({
       session,
       user: session?.user ?? null,
-      company: session?.company ?? null,
+      workspace: session?.workspace ?? session?.company ?? null,
+      company: session?.workspace ?? session?.company ?? null,
       portal: session?.portal ?? null,
       isLoading,
       adminLogin,
+      workspaceLogin,
       companyLogin,
       logout,
     }),
-    [session, isLoading, adminLogin, companyLogin, logout]
+    [session, isLoading, adminLogin, workspaceLogin, companyLogin, logout]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

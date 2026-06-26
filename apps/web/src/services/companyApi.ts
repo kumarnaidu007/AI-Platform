@@ -1,5 +1,11 @@
 import { api } from "@/services/authApi";
 import type { ConnectionStatus, IntegrationAuthType, IntegrationCategory } from "@/types/platform";
+import type {
+  CompanyAgentCatalogItem,
+  MemberAgentAccess,
+  MyAgentItem,
+  ProjectAgentItem,
+} from "@/types/agents";
 
 export interface CompanyDashboard {
   companyName: string;
@@ -52,6 +58,7 @@ export interface Project {
   backendStack?: string;
   dbType?: string;
   vcsProvider?: string;
+  repoUrl?: string;
   pmTool?: string;
   notificationChannels: string[];
   monthlyTokenBudgetUsd?: number;
@@ -71,6 +78,44 @@ export interface PipelineRun {
   finishedAt?: string;
   errorMessage?: string;
   createdAt: string;
+  approvalPlan?: Record<string, unknown>;
+}
+
+export interface PipelineAgentLog {
+  id: string;
+  agentName: string;
+  outputJson?: Record<string, unknown>;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  modelName?: string;
+  createdAt: string;
+}
+
+export interface PipelineStep {
+  id: string;
+  stepName: string;
+  stepOrder: number;
+  status: string;
+  retryCount: number;
+  startedAt?: string;
+  finishedAt?: string;
+  errorMessage?: string;
+  logs: PipelineAgentLog[];
+}
+
+export interface PipelineRunDetail {
+  id: string;
+  projectId: string;
+  status: string;
+  currentStep?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  errorMessage?: string;
+  createdAt: string;
+  approvalPlan?: Record<string, unknown>;
+  steps: PipelineStep[];
+  artifacts: Record<string, unknown>;
 }
 
 export interface UserProfile {
@@ -129,6 +174,7 @@ export interface CompanyMember {
   role: string;
   isActive: boolean;
   integrationsAssigned: number;
+  agentsAssigned: number;
   joinedAt: string;
 }
 
@@ -192,6 +238,7 @@ function mapProject(raw: Record<string, unknown>): Project {
     backendStack: raw.backend_stack as string | undefined,
     dbType: raw.db_type as string | undefined,
     vcsProvider: raw.vcs_provider as string | undefined,
+    repoUrl: raw.repo_url as string | undefined,
     pmTool: raw.pm_tool as string | undefined,
     notificationChannels: (raw.notification_channels as string[]) ?? [],
     monthlyTokenBudgetUsd: raw.monthly_token_budget_usd != null ? Number(raw.monthly_token_budget_usd) : undefined,
@@ -213,6 +260,50 @@ function mapPipelineRun(raw: Record<string, unknown>): PipelineRun {
     finishedAt: raw.finished_at as string | undefined,
     errorMessage: raw.error_message as string | undefined,
     createdAt: String(raw.created_at),
+    approvalPlan: raw.approval_plan as Record<string, unknown> | undefined,
+  };
+}
+
+function mapPipelineRunDetail(raw: Record<string, unknown>): PipelineRunDetail {
+  const steps = Array.isArray(raw.steps) ? raw.steps : [];
+  return {
+    id: String(raw.id),
+    projectId: String(raw.project_id),
+    status: String(raw.status),
+    currentStep: raw.current_step as string | undefined,
+    startedAt: raw.started_at as string | undefined,
+    finishedAt: raw.finished_at as string | undefined,
+    errorMessage: raw.error_message as string | undefined,
+    createdAt: String(raw.created_at),
+    approvalPlan: raw.approval_plan as Record<string, unknown> | undefined,
+    steps: steps.map((step) => {
+      const s = step as Record<string, unknown>;
+      const logs = Array.isArray(s.logs) ? s.logs : [];
+      return {
+        id: String(s.id),
+        stepName: String(s.step_name),
+        stepOrder: Number(s.step_order),
+        status: String(s.status),
+        retryCount: Number(s.retry_count ?? 0),
+        startedAt: s.started_at as string | undefined,
+        finishedAt: s.finished_at as string | undefined,
+        errorMessage: s.error_message as string | undefined,
+        logs: logs.map((log) => {
+          const l = log as Record<string, unknown>;
+          return {
+            id: String(l.id),
+            agentName: String(l.agent_name),
+            outputJson: l.output_json as Record<string, unknown> | undefined,
+            inputTokens: Number(l.input_tokens ?? 0),
+            outputTokens: Number(l.output_tokens ?? 0),
+            costUsd: Number(l.cost_usd ?? 0),
+            modelName: l.model_name as string | undefined,
+            createdAt: String(l.created_at),
+          };
+        }),
+      };
+    }),
+    artifacts: (raw.artifacts as Record<string, unknown>) ?? {},
   };
 }
 
@@ -238,6 +329,7 @@ function mapMember(raw: Record<string, unknown>): CompanyMember {
     role: String(raw.role),
     isActive: Boolean(raw.is_active),
     integrationsAssigned: Number(raw.integrations_assigned ?? 0),
+    agentsAssigned: Number(raw.agents_assigned ?? 0),
     joinedAt: String(raw.joined_at),
   };
 }
@@ -275,7 +367,7 @@ function mapUserDashboard(raw: Record<string, unknown>): UserDashboard {
 
 export const companyApi = {
   getDashboard: async () => {
-    const { data } = await api.get<Record<string, unknown>>("/api/company/dashboard");
+    const { data } = await api.get<Record<string, unknown>>("/api/workspace/dashboard");
     return {
       companyName: String(data.company_name),
       companySlug: String(data.company_slug),
@@ -289,22 +381,22 @@ export const companyApi = {
   },
 
   getUserDashboard: async () => {
-    const { data } = await api.get<Record<string, unknown>>("/api/company/user-dashboard");
+    const { data } = await api.get<Record<string, unknown>>("/api/workspace/user-dashboard");
     return mapUserDashboard(data);
   },
 
   getProfile: async () => {
-    const { data } = await api.get<Record<string, unknown>>("/api/company/profile");
+    const { data } = await api.get<Record<string, unknown>>("/api/workspace/profile");
     return mapProfile(data);
   },
 
   updateProfile: async (fullName: string) => {
-    const { data } = await api.patch<Record<string, unknown>>("/api/company/profile", { full_name: fullName });
+    const { data } = await api.patch<Record<string, unknown>>("/api/workspace/profile", { full_name: fullName });
     return mapProfile(data);
   },
 
   changePassword: async (currentPassword: string, newPassword: string) => {
-    const { data } = await api.post<{ success: boolean; message: string }>("/api/company/profile/password", {
+    const { data } = await api.post<{ success: boolean; message: string }>("/api/workspace/profile/password", {
       current_password: currentPassword,
       new_password: newPassword,
     });
@@ -312,7 +404,7 @@ export const companyApi = {
   },
 
   getSettings: async () => {
-    const { data } = await api.get<Record<string, unknown>>("/api/company/settings");
+    const { data } = await api.get<Record<string, unknown>>("/api/workspace/settings");
     return {
       emailDomain: (data.email_domain as string | null) ?? null,
       timezone: String(data.timezone ?? "UTC"),
@@ -320,7 +412,7 @@ export const companyApi = {
   },
 
   updateSettings: async (emailDomain: string) => {
-    const { data } = await api.patch<Record<string, unknown>>("/api/company/settings", {
+    const { data } = await api.patch<Record<string, unknown>>("/api/workspace/settings", {
       email_domain: emailDomain,
     });
     return {
@@ -330,22 +422,22 @@ export const companyApi = {
   },
 
   getIntegrationCatalog: async () => {
-    const { data } = await api.get<Record<string, unknown>[]>("/api/company/integrations");
+    const { data } = await api.get<Record<string, unknown>[]>("/api/workspace/integrations");
     return data.map(mapCatalog);
   },
 
   getMyIntegrations: async () => {
-    const { data } = await api.get<Record<string, unknown>[]>("/api/company/my-integrations");
+    const { data } = await api.get<Record<string, unknown>[]>("/api/workspace/my-integrations");
     return data.map(mapMyIntegration);
   },
 
   getMyIntegration: async (key: string) => {
-    const { data } = await api.get<Record<string, unknown>>(`/api/company/my-integrations/${key}`);
+    const { data } = await api.get<Record<string, unknown>>(`/api/workspace/my-integrations/${key}`);
     return mapMyIntegration(data);
   },
 
   saveMyIntegrationConnection: async (key: string, connectionName: string, config: Record<string, string>) => {
-    const { data } = await api.put<Record<string, unknown>>(`/api/company/my-integrations/${key}/connection`, {
+    const { data } = await api.put<Record<string, unknown>>(`/api/workspace/my-integrations/${key}/connection`, {
       connection_name: connectionName,
       config,
     });
@@ -354,18 +446,18 @@ export const companyApi = {
 
   testMyIntegration: async (key: string) => {
     const { data } = await api.post<{ success: boolean; message: string }>(
-      `/api/company/my-integrations/${key}/test`
+      `/api/workspace/my-integrations/${key}/test`
     );
     return data;
   },
 
   deleteMyIntegrationConnection: async (key: string) => {
-    const { data } = await api.delete<Record<string, unknown>>(`/api/company/my-integrations/${key}/connection`);
+    const { data } = await api.delete<Record<string, unknown>>(`/api/workspace/my-integrations/${key}/connection`);
     return mapMyIntegration(data);
   },
 
   getServices: async () => {
-    const { data } = await api.get<Record<string, unknown>[]>("/api/company/services");
+    const { data } = await api.get<Record<string, unknown>[]>("/api/workspace/services");
     return data.map(
       (row): CompanyService => ({
         serviceKey: String(row.service_key),
@@ -376,12 +468,12 @@ export const companyApi = {
   },
 
   getProjects: async () => {
-    const { data } = await api.get<Record<string, unknown>[]>("/api/company/projects");
+    const { data } = await api.get<Record<string, unknown>[]>("/api/workspace/projects");
     return data.map(mapProjectSummary);
   },
 
   getProject: async (projectId: string) => {
-    const { data } = await api.get<Record<string, unknown>>(`/api/company/projects/${projectId}`);
+    const { data } = await api.get<Record<string, unknown>>(`/api/workspace/projects/${projectId}`);
     return mapProject(data);
   },
 
@@ -392,15 +484,17 @@ export const companyApi = {
     backendStack?: string;
     dbType?: string;
     vcsProvider?: string;
+    repoUrl?: string;
     pmTool?: string;
   }) => {
-    const { data } = await api.post<Record<string, unknown>>("/api/company/projects", {
+    const { data } = await api.post<Record<string, unknown>>("/api/workspace/projects", {
       name: payload.name,
       description: payload.description,
       frontend_stack: payload.frontendStack,
       backend_stack: payload.backendStack,
       db_type: payload.dbType,
-      vcs_provider: payload.vcsProvider,
+      vcs_provider: payload.vcsProvider ?? "github",
+      repo_url: payload.repoUrl,
       pm_tool: payload.pmTool,
     });
     return mapProject(data);
@@ -408,33 +502,73 @@ export const companyApi = {
 
   updateProject: async (
     projectId: string,
-    payload: { name?: string; description?: string; status?: string }
+    payload: { name?: string; description?: string; status?: string; repoUrl?: string }
   ) => {
-    const { data } = await api.patch<Record<string, unknown>>(`/api/company/projects/${projectId}`, {
+    const { data } = await api.patch<Record<string, unknown>>(`/api/workspace/projects/${projectId}`, {
       name: payload.name,
       description: payload.description,
       status: payload.status,
+      repo_url: payload.repoUrl,
     });
     return mapProject(data);
   },
 
   getProjectRuns: async (projectId: string) => {
-    const { data } = await api.get<Record<string, unknown>[]>(`/api/company/projects/${projectId}/runs`);
+    const { data } = await api.get<Record<string, unknown>[]>(`/api/workspace/projects/${projectId}/runs`);
     return data.map(mapPipelineRun);
   },
 
+  startPipelineRun: async (
+    projectId: string,
+    options: {
+      requirementsText?: string;
+      jiraIssueKey?: string;
+      agentKeys?: string[];
+    }
+  ) => {
+    const { data } = await api.post<Record<string, unknown>>(`/api/workspace/projects/${projectId}/runs`, {
+      requirements_text: options.requirementsText ?? "",
+      jira_issue_key: options.jiraIssueKey,
+      agent_keys: options.agentKeys,
+    });
+    return mapPipelineRun(data);
+  },
+
+  getPipelineRunDetail: async (projectId: string, runId: string) => {
+    const { data } = await api.get<Record<string, unknown>>(
+      `/api/workspace/projects/${projectId}/runs/${runId}`
+    );
+    return mapPipelineRunDetail(data);
+  },
+
+  approvePipelineRun: async (projectId: string, runId: string, comment?: string) => {
+    const { data } = await api.post<Record<string, unknown>>(
+      `/api/workspace/projects/${projectId}/runs/${runId}/approve`,
+      { comment }
+    );
+    return mapPipelineRun(data);
+  },
+
+  rejectPipelineRun: async (projectId: string, runId: string, comment?: string) => {
+    const { data } = await api.post<Record<string, unknown>>(
+      `/api/workspace/projects/${projectId}/runs/${runId}/reject`,
+      { comment }
+    );
+    return mapPipelineRun(data);
+  },
+
   getMembers: async () => {
-    const { data } = await api.get<Record<string, unknown>[]>("/api/company/members");
+    const { data } = await api.get<Record<string, unknown>[]>("/api/workspace/members");
     return data.map(mapMember);
   },
 
   getMember: async (memberId: string) => {
-    const { data } = await api.get<Record<string, unknown>>(`/api/company/members/${memberId}`);
+    const { data } = await api.get<Record<string, unknown>>(`/api/workspace/members/${memberId}`);
     return mapMember(data);
   },
 
   createMember: async (payload: { email: string; fullName: string; password: string; role: string }) => {
-    const { data } = await api.post<Record<string, unknown>>("/api/company/members", {
+    const { data } = await api.post<Record<string, unknown>>("/api/workspace/members", {
       email: payload.email,
       full_name: payload.fullName,
       password: payload.password,
@@ -444,7 +578,7 @@ export const companyApi = {
   },
 
   updateMember: async (memberId: string, payload: { role?: string; isActive?: boolean }) => {
-    const { data } = await api.patch<Record<string, unknown>>(`/api/company/members/${memberId}`, {
+    const { data } = await api.patch<Record<string, unknown>>(`/api/workspace/members/${memberId}`, {
       role: payload.role,
       is_active: payload.isActive,
     });
@@ -452,7 +586,7 @@ export const companyApi = {
   },
 
   getMemberIntegrations: async (memberId: string) => {
-    const { data } = await api.get<Record<string, unknown>[]>(`/api/company/members/${memberId}/integrations`);
+    const { data } = await api.get<Record<string, unknown>[]>(`/api/workspace/members/${memberId}/integrations`);
     return data.map(mapMemberIntegration);
   },
 
@@ -460,12 +594,120 @@ export const companyApi = {
     memberId: string,
     integrations: Array<{ integrationKey: string; isAssigned: boolean }>
   ) => {
-    const { data } = await api.put<Record<string, unknown>[]>(`/api/company/members/${memberId}/integrations`, {
+    const { data } = await api.put<Record<string, unknown>[]>(`/api/workspace/members/${memberId}/integrations`, {
       integrations: integrations.map((i) => ({
         integration_key: i.integrationKey,
         is_assigned: i.isAssigned,
       })),
     });
     return data.map(mapMemberIntegration);
+  },
+
+  getAgentCatalog: async () => {
+    const { data } = await api.get<Record<string, unknown>[]>("/api/workspace/agents");
+    return data.map(
+      (row): CompanyAgentCatalogItem => ({
+        agentKey: String(row.agent_key),
+        name: String(row.name),
+        description: row.description != null ? String(row.description) : null,
+        category: String(row.category),
+        group: row.group != null ? String(row.group) : null,
+        defaultStepOrder: Number(row.default_step_order),
+        isGranted: Boolean(row.is_granted ?? true),
+      })
+    );
+  },
+
+  getMyAgents: async () => {
+    const { data } = await api.get<Record<string, unknown>[]>("/api/workspace/my-agents");
+    return data.map(
+      (row): MyAgentItem => ({
+        agentKey: String(row.agent_key),
+        name: String(row.name),
+        description: row.description != null ? String(row.description) : null,
+        category: String(row.category),
+        group: row.group != null ? String(row.group) : null,
+        defaultStepOrder: Number(row.default_step_order),
+        isAssigned: Boolean(row.is_assigned),
+        isEnabledOnPlatform: Boolean(row.is_enabled_on_platform ?? true),
+      })
+    );
+  },
+
+  getMemberAgents: async (memberId: string) => {
+    const { data } = await api.get<Record<string, unknown>[]>(`/api/workspace/members/${memberId}/agents`);
+    return data.map(
+      (row): MemberAgentAccess => ({
+        agentKey: String(row.agent_key),
+        name: String(row.name),
+        category: String(row.category),
+        group: row.group != null ? String(row.group) : null,
+        defaultStepOrder: Number(row.default_step_order),
+        isAssigned: Boolean(row.is_assigned),
+      })
+    );
+  },
+
+  updateMemberAgents: async (
+    memberId: string,
+    agents: Array<{ agentKey: string; isAssigned: boolean }>
+  ) => {
+    const { data } = await api.put<Record<string, unknown>[]>(`/api/workspace/members/${memberId}/agents`, {
+      agents: agents.map((a) => ({
+        agent_key: a.agentKey,
+        is_assigned: a.isAssigned,
+      })),
+    });
+    return data.map(
+      (row): MemberAgentAccess => ({
+        agentKey: String(row.agent_key),
+        name: String(row.name),
+        category: String(row.category),
+        group: row.group != null ? String(row.group) : null,
+        defaultStepOrder: Number(row.default_step_order),
+        isAssigned: Boolean(row.is_assigned),
+      })
+    );
+  },
+
+  getProjectAgents: async (projectId: string) => {
+    const { data } = await api.get<Record<string, unknown>[]>(`/api/workspace/projects/${projectId}/agents`);
+    return data.map(
+      (row): ProjectAgentItem => ({
+        agentKey: String(row.agent_key),
+        name: String(row.name),
+        category: String(row.category),
+        group: row.group != null ? String(row.group) : null,
+        stepOrder: Number(row.step_order),
+        isEnabled: Boolean(row.is_enabled),
+        isAssigned: Boolean(row.is_assigned),
+        defaultStepOrder: Number(row.default_step_order),
+      })
+    );
+  },
+
+  updateProjectAgents: async (
+    projectId: string,
+    agents: Array<{ agentKey: string; isEnabled: boolean; stepOrder?: number }>
+  ) => {
+    const { data } = await api.put<Record<string, unknown>[]>(`/api/workspace/projects/${projectId}/agents`, {
+      agents: agents.map((a) => ({
+        agent_key: a.agentKey,
+        is_enabled: a.isEnabled,
+        step_order: a.stepOrder,
+      })),
+    });
+    return data.map(
+      (row): ProjectAgentItem => ({
+        agentKey: String(row.agent_key),
+        name: String(row.name),
+        category: String(row.category),
+        group: row.group != null ? String(row.group) : null,
+        stepOrder: Number(row.step_order),
+        isEnabled: Boolean(row.is_enabled),
+        isAssigned: Boolean(row.is_assigned),
+        defaultStepOrder: Number(row.default_step_order),
+      })
+    );
   },
 };

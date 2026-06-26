@@ -6,11 +6,11 @@ import { companyApi } from "@/services/companyApi";
 import { useAuth } from "@/context/AuthContext";
 
 export function CompanyProfilePage() {
-  const { user, company } = useAuth();
+  const { user } = useAuth();
   const queryClient = useQueryClient();
   const [message, setMessage] = useState<string | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
-  const isViewer = company?.role === "viewer";
+  const isViewer = false;
 
   const { data, isLoading, isError, error: loadError } = useQuery({
     queryKey: ["user-profile"],

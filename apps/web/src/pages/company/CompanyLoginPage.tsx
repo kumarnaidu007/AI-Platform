@@ -1,22 +1,24 @@
 import { useState } from "react";
-import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
-import { Building2 } from "lucide-react";
+import { Link, Navigate, useNavigate } from "react-router-dom";
+import { Users } from "lucide-react";
 import { PasswordInput } from "@/components/auth/PasswordInput";
 import { useAuth } from "@/context/AuthContext";
 import { getRememberedCompanyEmail, setRememberedCompanyEmail } from "@/lib/loginStorage";
 import { getApiErrorMessage } from "@/services/authApi";
 
+const WORKSPACE_KEY = "workspace";
+
 export function CompanyLoginPage() {
-  const { slug } = useParams<{ slug: string }>();
-  const { companyLogin, portal, company, isLoading } = useAuth();
+  const { workspaceLogin, portal, workspace, company, isLoading } = useAuth();
+  const ctx = workspace ?? company;
   const navigate = useNavigate();
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [remember, setRemember] = useState(() => Boolean(slug && getRememberedCompanyEmail(slug)));
-  const [email, setEmail] = useState(() => (slug ? getRememberedCompanyEmail(slug) : ""));
+  const [remember, setRemember] = useState(() => Boolean(getRememberedCompanyEmail(WORKSPACE_KEY)));
+  const [email, setEmail] = useState(() => getRememberedCompanyEmail(WORKSPACE_KEY));
 
-  if (!isLoading && portal === "company" && company?.slug === slug) {
-    return <Navigate to={`/c/${slug}`} replace />;
+  if (!isLoading && (portal === "workspace" || portal === "company") && ctx) {
+    return <Navigate to="/workspace" replace />;
   }
 
   return (
@@ -24,17 +26,16 @@ export function CompanyLoginPage() {
       <div className="w-full max-w-md rounded-xl border bg-card p-8 shadow-sm">
         <div className="mb-8 flex flex-col items-center text-center">
           <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-lg bg-primary">
-            <Building2 className="h-6 w-6 text-primary-foreground" />
+            <Users className="h-6 w-6 text-primary-foreground" />
           </div>
-          <h1 className="text-xl font-semibold">Company Portal</h1>
-          <p className="mt-1 text-sm text-muted-foreground">Sign in to /{slug}</p>
+          <h1 className="text-xl font-semibold">Team Sign In</h1>
+          <p className="mt-1 text-sm text-muted-foreground">AI Dev Platform workspace</p>
         </div>
 
         <form
           className="space-y-4"
           onSubmit={async (e) => {
             e.preventDefault();
-            if (!slug) return;
             setError("");
             setSubmitting(true);
             const fd = new FormData(e.currentTarget);
@@ -42,9 +43,9 @@ export function CompanyLoginPage() {
             const passwordValue = String(fd.get("password") ?? "");
             const rememberMe = fd.get("remember") === "on";
             try {
-              await companyLogin(emailValue, passwordValue, slug);
-              setRememberedCompanyEmail(slug, emailValue, rememberMe);
-              navigate(`/c/${slug}`, { replace: true });
+              await workspaceLogin(emailValue, passwordValue);
+              setRememberedCompanyEmail(WORKSPACE_KEY, emailValue, rememberMe);
+              navigate("/workspace", { replace: true });
             } catch (err) {
               setError(getApiErrorMessage(err, "Login failed"));
             } finally {
@@ -60,7 +61,7 @@ export function CompanyLoginPage() {
               type="email"
               required
               autoComplete="username"
-              placeholder="admin@yourcompany.com"
+              placeholder="lead@platform.io"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               className="mt-1.5 h-10 w-full rounded-md border bg-background px-3 text-sm"
@@ -91,7 +92,7 @@ export function CompanyLoginPage() {
         </form>
 
         <p className="mt-6 text-center text-xs text-muted-foreground">
-          <Link to="/login" className="underline hover:text-foreground">Super admin login</Link>
+          <Link to="/login" className="underline hover:text-foreground">Super admin sign in</Link>
         </p>
       </div>
     </div>
