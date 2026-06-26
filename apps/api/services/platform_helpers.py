@@ -7,6 +7,37 @@ from models.platform import PlatformConnection, PlatformIntegration, PlatformSer
 from services.secrets import decrypt_secrets, encrypt_secrets, mask_secret
 
 
+def get_oauth_credentials_from_connection(
+    conn: PlatformConnection | None,
+) -> tuple[str | None, str | None]:
+    """Read OAuth client_id/client_secret from platform connection storage.
+
+    Non-secret fields (e.g. client_id) are stored in config_metadata_json; secrets
+  are encrypted. Both must be merged for OAuth to work.
+    """
+    if not conn:
+        return None, None
+    metadata = conn.config_metadata_json or {}
+    secrets = decrypt_secrets(conn.encrypted_config_ref) if conn.encrypted_config_ref else {}
+    client_id = (
+        secrets.get("client_id")
+        or secrets.get("clientId")
+        or metadata.get("client_id")
+        or metadata.get("clientId")
+    )
+    client_secret = secrets.get("client_secret") or secrets.get("clientSecret")
+    if client_id is not None:
+        client_id = str(client_id).strip() or None
+    if client_secret is not None:
+        client_secret = str(client_secret).strip() or None
+    return client_id, client_secret
+
+
+def oauth_credentials_configured(conn: PlatformConnection | None) -> bool:
+    client_id, client_secret = get_oauth_credentials_from_connection(conn)
+    return bool(client_id and client_secret)
+
+
 def _primary_connection(integration: PlatformIntegration) -> PlatformConnection | None:
     if not integration.connections:
         return None
@@ -27,7 +58,44 @@ def integration_is_assignable(integration: PlatformIntegration) -> bool:
 
 
 def service_is_assignable(service: PlatformService) -> bool:
-    return service.is_enabled and bool(service.encrypted_config_ref)
+    if not service.is_enabled:
+        return False
+    if service.service_key == "azure_foundry":
+        return foundry_service_configured(service)
+    return bool(service.encrypted_config_ref)
+
+
+def foundry_service_configured(service: PlatformService | None) -> bool:
+    if not service or not service.encrypted_config_ref:
+        return False
+    metadata = service.config_metadata_json or {}
+    endpoint = str(metadata.get("endpoint") or metadata.get("base_url") or "").strip()
+    deployment = str(metadata.get("deployment_name") or metadata.get("deployment") or "").strip()
+    secrets = decrypt_secrets(service.encrypted_config_ref)
+    api_key = secrets.get("api_key")
+    return bool(api_key and endpoint and deployment)
+
+
+def get_foundry_config_from_service(service: PlatformService | None) -> dict[str, str] | None:
+    if not service or not foundry_service_configured(service):
+        return None
+    metadata = service.config_metadata_json or {}
+    secrets = decrypt_secrets(service.encrypted_config_ref)
+    raw_endpoint = str(metadata.get("endpoint") or metadata.get("base_url") or "").strip().rstrip("/")
+    endpoint = raw_endpoint
+    if endpoint and not endpoint.endswith("/openai/v1"):
+        if "/openai/" not in endpoint:
+            endpoint = f"{endpoint}/openai/v1"
+    deployment = str(metadata.get("deployment_name") or metadata.get("deployment") or "").strip()
+    embedding = str(
+        metadata.get("embedding_deployment") or metadata.get("embedding_model") or "text-embedding-3-small"
+    ).strip()
+    return {
+        "api_key": str(secrets.get("api_key") or ""),
+        "endpoint": endpoint,
+        "deployment_name": deployment,
+        "embedding_deployment": embedding,
+    }
 
 
 def integration_to_dict(integration: PlatformIntegration) -> dict[str, Any]:
@@ -98,13 +166,16 @@ def save_connection(
 
 
 def service_to_dict(service: PlatformService) -> dict[str, Any]:
+    configured = foundry_service_configured(service) if service.service_key == "azure_foundry" else bool(
+        service.encrypted_config_ref
+    )
     return {
         "id": service.id,
         "service_key": service.service_key,
         "display_name": service.display_name,
         "description": service.description,
         "is_enabled": service.is_enabled,
-        "is_configured": bool(service.encrypted_config_ref),
+        "is_configured": configured,
         "config_metadata": service.config_metadata_json or {},
         "last_tested_at": service.last_tested_at,
         "last_test_status": service.last_test_status,
