@@ -32,7 +32,9 @@ class JiraAppConfig:
 
 
 class JiraError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def get_platform_jira_config(db: Session) -> JiraAppConfig | None:
@@ -102,15 +104,103 @@ def get_jira_connection(db: Session, workspace_id, user_id) -> MemberIntegration
     return get_member_connection(db, workspace_id, user_id, integration.id)
 
 
-def get_jira_tokens(conn: MemberIntegrationConnection | None) -> dict[str, str]:
+def _load_token_secrets(conn: MemberIntegrationConnection) -> dict[str, str]:
+    if not conn.encrypted_config_ref:
+        return {}
+    return decrypt_secrets(conn.encrypted_config_ref)
+
+
+def _persist_token_secrets(db: Session, conn: MemberIntegrationConnection, payload: dict[str, str]) -> None:
+    conn.encrypted_config_ref = encrypt_secrets(payload)
+    conn.status = "connected"
+    conn.last_error_message = None
+    conn.last_test_status = True
+    conn.last_tested_at = datetime.now(UTC)
+    db.commit()
+    db.refresh(conn)
+
+
+def _mark_jira_connection_expired(db: Session, conn: MemberIntegrationConnection, message: str) -> None:
+    conn.status = "expired"
+    conn.last_error_message = message
+    conn.last_test_status = False
+    conn.last_tested_at = datetime.now(UTC)
+    db.commit()
+    db.refresh(conn)
+
+
+def get_jira_tokens(db: Session, conn: MemberIntegrationConnection | None) -> dict[str, str]:
     if not conn or not conn.encrypted_config_ref:
         raise JiraError("Jira is not connected. Connect Jira under My Integrations.")
-    secrets = decrypt_secrets(conn.encrypted_config_ref)
+    secrets = _load_token_secrets(conn)
     access_token = secrets.get("access_token")
     cloud_id = secrets.get("cloud_id")
     if not access_token or not cloud_id:
         raise JiraError("Jira access token missing. Reconnect your Jira account.")
-    return {"access_token": access_token, "cloud_id": cloud_id}
+    if conn.status == "expired":
+        return refresh_jira_access_token(db, conn)
+    return {"access_token": access_token, "cloud_id": cloud_id, "refresh_token": secrets.get("refresh_token", "")}
+
+
+def refresh_jira_access_token(db: Session, conn: MemberIntegrationConnection) -> dict[str, str]:
+    secrets = _load_token_secrets(conn)
+    refresh_token = secrets.get("refresh_token")
+    cloud_id = secrets.get("cloud_id")
+    if not refresh_token:
+        message = "Jira session expired. Reconnect Jira under My Integrations."
+        _mark_jira_connection_expired(db, conn, message)
+        raise JiraError(message, status_code=401)
+    if not cloud_id:
+        message = "Jira connection is incomplete. Reconnect Jira under My Integrations."
+        _mark_jira_connection_expired(db, conn, message)
+        raise JiraError(message, status_code=401)
+
+    config = get_platform_jira_config(db)
+    if not config:
+        raise JiraError("Platform Jira OAuth app is not configured. Contact your administrator.")
+
+    with httpx.Client(timeout=30) as client:
+        resp = client.post(
+            ATLASSIAN_TOKEN,
+            json={
+                "grant_type": "refresh_token",
+                "client_id": config.client_id,
+                "client_secret": config.client_secret,
+                "refresh_token": refresh_token,
+            },
+            headers={"Content-Type": "application/json"},
+        )
+    if resp.status_code >= 400:
+        message = "Jira session expired. Reconnect Jira under My Integrations."
+        _mark_jira_connection_expired(db, conn, message)
+        raise JiraError(message, status_code=401)
+
+    data = resp.json()
+    access_token = data.get("access_token")
+    if not access_token:
+        message = "Jira did not return a new access token. Reconnect Jira under My Integrations."
+        _mark_jira_connection_expired(db, conn, message)
+        raise JiraError(message, status_code=401)
+
+    new_refresh = data.get("refresh_token") or refresh_token
+    _persist_token_secrets(
+        db,
+        conn,
+        {"access_token": access_token, "cloud_id": cloud_id, "refresh_token": new_refresh},
+    )
+    return {"access_token": access_token, "cloud_id": cloud_id, "refresh_token": new_refresh}
+
+
+def call_with_jira_tokens(db: Session, conn: MemberIntegrationConnection, fn):
+    """Run fn(tokens). On 401, refresh the OAuth token once and retry."""
+    tokens = get_jira_tokens(db, conn)
+    try:
+        return fn(tokens)
+    except JiraError as exc:
+        if exc.status_code != 401:
+            raise
+        tokens = refresh_jira_access_token(db, conn)
+        return fn(tokens)
 
 
 def _jira_headers(token: str) -> dict[str, str]:
@@ -129,7 +219,7 @@ def _request(method: str, url: str, token: str, **kwargs) -> Any:
             detail = resp.json().get("message", detail)
         except Exception:
             pass
-        raise JiraError(f"Jira API error ({resp.status_code}): {detail}")
+        raise JiraError(f"Jira API error ({resp.status_code}): {detail}", status_code=resp.status_code)
     if resp.status_code == 204:
         return None
     return resp.json()
@@ -236,18 +326,32 @@ def search_issues(
         )
     else:
         query = "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
-    url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/search"
-    data = _request(
-        "POST",
-        url,
-        token,
-        json={
+
+    url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/search/jql"
+    fields = ["summary", "status", "priority", "issuetype", "assignee", "project", "updated"]
+    issues: list[dict[str, Any]] = []
+    next_page_token: str | None = None
+
+    while len(issues) < max_results:
+        body: dict[str, Any] = {
             "jql": query,
-            "maxResults": max_results,
-            "fields": ["summary", "status", "priority", "issuetype", "assignee", "project", "updated"],
-        },
-    )
-    return [_normalize_issue(row, site_url=site_url) for row in data.get("issues", [])]
+            "maxResults": min(max_results - len(issues), 100),
+            "fields": fields,
+        }
+        if next_page_token:
+            body["nextPageToken"] = next_page_token
+
+        data = _request("POST", url, token, json=body)
+        batch = data.get("issues") or []
+        issues.extend(batch)
+
+        if data.get("isLast", True) or not batch:
+            break
+        next_page_token = data.get("nextPageToken")
+        if not next_page_token:
+            break
+
+    return [_normalize_issue(row, site_url=site_url) for row in issues[:max_results]]
 
 
 def get_issue(
@@ -334,18 +438,21 @@ def notify_jira_pr_created(
     conn = get_jira_connection(db, workspace_id, user_id)
     if not conn:
         return
-    tokens = get_jira_tokens(conn)
+
+    def _notify(tokens: dict[str, str]) -> None:
+        add_issue_comment(tokens["access_token"], tokens["cloud_id"], issue_key, body)
+        add_issue_remote_link(
+            tokens["access_token"],
+            tokens["cloud_id"],
+            issue_key,
+            title=pr_title,
+            url=pr_url,
+        )
+
     body = f"AI pipeline opened a pull request: {pr_title}\n{pr_url}"
     if summary:
         body += f"\n\nSummary:\n{summary[:2000]}"
-    add_issue_comment(tokens["access_token"], tokens["cloud_id"], issue_key, body)
-    add_issue_remote_link(
-        tokens["access_token"],
-        tokens["cloud_id"],
-        issue_key,
-        title=pr_title,
-        url=pr_url,
-    )
+    call_with_jira_tokens(db, conn, _notify)
 
 
 def save_user_jira_tokens(
@@ -372,8 +479,10 @@ def save_user_jira_tokens(
     payload: dict[str, str] = {"access_token": access_token, "cloud_id": cloud_id}
     if refresh_token:
         payload["refresh_token"] = refresh_token
-    conn.encrypted_config_ref = encrypt_secrets(payload)
-    conn.status = "connected"
+    elif conn.encrypted_config_ref:
+        existing = _load_token_secrets(conn)
+        if existing.get("refresh_token"):
+            payload["refresh_token"] = existing["refresh_token"]
     conn.connection_name = resource.get("name") or profile.get("displayName") or "Jira"
     conn.config_metadata_json = {
         "jira_site_name": resource.get("name", ""),
@@ -382,10 +491,7 @@ def save_user_jira_tokens(
         "jira_display_name": profile.get("displayName", ""),
         "connected_via": "oauth2",
     }
-    conn.last_test_status = True
-    conn.last_tested_at = datetime.now(UTC)
-    db.commit()
-    db.refresh(conn)
+    _persist_token_secrets(db, conn, payload)
     return conn
 
 
