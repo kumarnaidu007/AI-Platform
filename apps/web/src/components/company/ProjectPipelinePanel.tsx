@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, ExternalLink, Loader2, Play, XCircle } from "lucide-react";
-import { AgentIcon } from "@/components/admin/AgentIcon";
+import { ExternalLink, Loader2, Play } from "lucide-react";
+import { AgentRunPicker } from "@/components/company/AgentRunPicker";
+import { PipelineRunTracker } from "@/components/company/PipelineRunTracker";
 import { companyApi } from "@/services/companyApi";
+import { defaultRunSelection, selectedAgentKeys } from "@/lib/agentRunUtils";
 import { githubApi } from "@/services/githubApi";
 import { jiraApi } from "@/services/jiraApi";
 import { getApiErrorMessage } from "@/services/authApi";
+import { POLL_PIPELINE_MS, POLL_PROJECT_RUNS_MS, shouldPollPipeline } from "@/lib/polling";
 import { cn } from "@/lib/utils";
 
 interface ProjectPipelinePanelProps {
@@ -23,13 +26,6 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 const ACTIVE_RUN_STATUSES = new Set(["pending", "running", "awaiting_approval"]);
-
-function StepIcon({ status }: { status: string }) {
-  if (status === "running") return <Loader2 className="h-4 w-4 animate-spin text-blue-600" />;
-  if (status === "completed") return <CheckCircle2 className="h-4 w-4 text-emerald-600" />;
-  if (status === "failed") return <XCircle className="h-4 w-4 text-red-600" />;
-  return <span className="h-2 w-2 rounded-full bg-muted-foreground/40" />;
-}
 
 export function ProjectPipelinePanel({ projectId }: ProjectPipelinePanelProps) {
   const queryClient = useQueryClient();
@@ -74,7 +70,7 @@ export function ProjectPipelinePanel({ projectId }: ProjectPipelinePanelProps) {
     queryFn: () => companyApi.getProjectRuns(projectId),
     refetchInterval: (query) => {
       const runs = query.state.data ?? [];
-      return runs.some((r) => ACTIVE_RUN_STATUSES.has(r.status)) ? 3000 : false;
+      return runs.some((r) => ACTIVE_RUN_STATUSES.has(r.status)) ? POLL_PROJECT_RUNS_MS : false;
     },
   });
 
@@ -84,7 +80,7 @@ export function ProjectPipelinePanel({ projectId }: ProjectPipelinePanelProps) {
     enabled: !!selectedRunId,
     refetchInterval: (query) => {
       const status = query.state.data?.status;
-      return status && ACTIVE_RUN_STATUSES.has(status) ? 2000 : false;
+      return shouldPollPipeline(status) ? POLL_PIPELINE_MS : false;
     },
   });
 
@@ -97,16 +93,8 @@ export function ProjectPipelinePanel({ projectId }: ProjectPipelinePanelProps) {
   useEffect(() => {
     if (!agents.length) return;
     setSelectedAgents((prev) => {
-      const hasAny = Object.values(prev).some(Boolean);
-      if (hasAny) return prev;
-      const next: Record<string, boolean> = {};
-      for (const agent of agents) {
-        next[agent.agentKey] = agent.isEnabled;
-      }
-      if (!Object.values(next).some(Boolean) && agents.length > 0) {
-        next[agents[0].agentKey] = true;
-      }
-      return next;
+      if (Object.values(prev).some(Boolean)) return prev;
+      return defaultRunSelection(agents);
     });
   }, [agents]);
 
@@ -137,9 +125,7 @@ export function ProjectPipelinePanel({ projectId }: ProjectPipelinePanelProps) {
 
   const startMutation = useMutation({
     mutationFn: () => {
-      const agentKeys = Object.entries(selectedAgents)
-        .filter(([, enabled]) => enabled)
-        .map(([key]) => key);
+      const agentKeys = selectedAgentKeys(selectedAgents);
       return companyApi.startPipelineRun(projectId, {
         requirementsText: requirements,
         jiraIssueKey: mode === "jira" ? selectedIssueKey : undefined,
@@ -327,40 +313,15 @@ export function ProjectPipelinePanel({ projectId }: ProjectPipelinePanelProps) {
 
           <div className="mt-4">
             <label className="text-xs font-medium text-muted-foreground">Agents for this run</label>
-            {agentsQuery.isLoading ? (
-              <p className="mt-2 text-xs text-muted-foreground">Loading agents...</p>
-            ) : agents.length === 0 ? (
-              <p className="mt-2 text-xs text-muted-foreground">
-                No agents assigned to you. Ask your team lead to assign agents.
-              </p>
-            ) : (
-              <div className="mt-2 space-y-2">
-                {agents.map((agent) => (
-                  <label
-                    key={agent.agentKey}
-                    className="flex cursor-pointer items-center justify-between gap-3 rounded-md border px-3 py-2"
-                  >
-                    <div className="flex min-w-0 items-center gap-3">
-                      <div className="flex h-8 w-8 items-center justify-center rounded-md bg-muted">
-                        <AgentIcon agentKey={agent.agentKey} className="h-4 w-4" />
-                      </div>
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium">{agent.name}</p>
-                        <p className="text-xs text-muted-foreground">Step {agent.stepOrder}</p>
-                      </div>
-                    </div>
-                    <input
-                      type="checkbox"
-                      checked={selectedAgents[agent.agentKey] ?? false}
-                      onChange={(e) =>
-                        setSelectedAgents((prev) => ({ ...prev, [agent.agentKey]: e.target.checked }))
-                      }
-                      className="h-4 w-4"
-                    />
-                  </label>
-                ))}
-              </div>
-            )}
+            <div className="mt-2">
+              <AgentRunPicker
+                agents={agents}
+                selected={selectedAgents}
+                onChange={setSelectedAgents}
+                disabled={startMutation.isPending || agentsQuery.isLoading}
+                hint="Only implementation agents enabled on this project are listed."
+              />
+            </div>
           </div>
 
           {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
@@ -408,7 +369,7 @@ export function ProjectPipelinePanel({ projectId }: ProjectPipelinePanelProps) {
               Review the plan below. After approval, agents will write code, open PRs, run tests, and deploy.
             </p>
             {(detail.approvalPlan || detail.artifacts.approval_plan) ? (
-              <pre className="mt-3 max-h-64 overflow-auto rounded bg-white/80 p-3 text-xs">
+              <pre className="mt-3 max-h-48 overflow-auto rounded bg-white/80 p-3 text-xs">
                 {JSON.stringify(detail.approvalPlan ?? detail.artifacts.approval_plan, null, 2)}
               </pre>
             ) : null}
@@ -433,63 +394,9 @@ export function ProjectPipelinePanel({ projectId }: ProjectPipelinePanelProps) {
           </div>
         )}
 
-        {detail && (
-          <div className="mt-6 space-y-4 border-t pt-6">
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <p className="text-sm font-medium capitalize">Run status: {detail.status}</p>
-                {detail.currentStep && (
-                  <p className="text-xs text-muted-foreground">Current step: {detail.currentStep.replace(/_/g, " ")}</p>
-                )}
-                {detail.errorMessage && <p className="mt-1 text-xs text-red-600">{detail.errorMessage}</p>}
-              </div>
-              {(detail.status === "pending" || detail.status === "running") && (
-                <Loader2 className="h-5 w-5 animate-spin text-primary" />
-              )}
-            </div>
-
-            <ol className="space-y-2">
-              {detail.steps.map((step) => (
-                <li key={step.id} className="rounded-md border px-3 py-2.5">
-                  <div className="flex items-center gap-3">
-                    <StepIcon status={step.status} />
-                    <div className="flex h-8 w-8 items-center justify-center rounded-md bg-muted">
-                      <AgentIcon agentKey={step.stepName} className="h-4 w-4" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium capitalize">{step.stepName.replace(/_/g, " ")}</p>
-                      <p className="text-xs capitalize text-muted-foreground">{step.status}</p>
-                      {step.errorMessage && (
-                        <p className="mt-0.5 text-xs text-red-600">{step.errorMessage}</p>
-                      )}
-                    </div>
-                    <span className="text-xs text-muted-foreground">#{step.stepOrder}</span>
-                  </div>
-                  {step.logs[0]?.outputJson && (
-                    <details className="mt-2">
-                      <summary className="cursor-pointer text-xs text-primary">View output</summary>
-                      <pre className="mt-2 max-h-48 overflow-auto rounded bg-muted p-2 text-xs">
-                        {JSON.stringify(step.logs[0].outputJson, null, 2)}
-                      </pre>
-                    </details>
-                  )}
-                </li>
-              ))}
-            </ol>
-
-            {Object.keys(detail.artifacts).length > 0 && (
-              <div>
-                <h4 className="text-sm font-semibold">Artifacts</h4>
-                <div className="mt-2 space-y-2">
-                  {Object.entries(detail.artifacts).map(([key, value]) => (
-                    <details key={key} className="rounded-md border px-3 py-2">
-                      <summary className="cursor-pointer text-sm font-medium capitalize">{key}</summary>
-                      <pre className="mt-2 max-h-64 overflow-auto text-xs">{JSON.stringify(value, null, 2)}</pre>
-                    </details>
-                  ))}
-                </div>
-              </div>
-            )}
+        {detail && detail.status !== "awaiting_approval" && (
+          <div className="mt-4 border-t pt-4">
+            <PipelineRunTracker projectId={projectId} runId={detail.id} compact />
           </div>
         )}
       </div>
