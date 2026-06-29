@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import admin, admin_agents, auth, github, jira, oauth, pipeline, workspace, workspace_agents
+from app.routers import admin, admin_agents, auth, github, intakes, jira, notifications, oauth, pipeline, workspace, workspace_agents
 from db.session import SessionLocal, check_db_connection
 from services.seed import bootstrap_platform
 
@@ -46,6 +46,8 @@ app.include_router(workspace_agents.router)
 app.include_router(pipeline.router)
 app.include_router(github.router)
 app.include_router(jira.router)
+app.include_router(intakes.router)
+app.include_router(notifications.router)
 app.include_router(oauth.router)
 
 
