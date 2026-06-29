@@ -10,6 +10,7 @@ from schemas.pipeline import (
 )
 from services.pipeline_service import (
     approve_pipeline_run,
+    cancel_running_pipeline_run,
     get_run_detail,
     reject_pipeline_run,
     start_pipeline_run,
@@ -54,9 +55,9 @@ def create_pipeline_run(
     from services.jira_service import (
         JiraError,
         build_requirements_from_issue,
+        call_with_jira_tokens,
         get_issue,
         get_jira_connection,
-        get_jira_tokens,
         user_has_jira_assigned,
     )
 
@@ -79,13 +80,16 @@ def create_pipeline_run(
             raise HTTPException(400, "Jira has not been assigned to your account")
         conn = get_jira_connection(db, ctx.workspace_id, ctx.user.id)
         try:
-            tokens = get_jira_tokens(conn)
             metadata = (conn.config_metadata_json or {}) if conn else {}
-            issue = get_issue(
-                tokens["access_token"],
-                tokens["cloud_id"],
-                jira_issue_key,
-                site_url=metadata.get("jira_site_url"),
+            issue = call_with_jira_tokens(
+                db,
+                conn,
+                lambda t: get_issue(
+                    t["access_token"],
+                    t["cloud_id"],
+                    jira_issue_key,
+                    site_url=metadata.get("jira_site_url"),
+                ),
             )
         except JiraError as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -140,6 +144,18 @@ def reject_pipeline(project_id: str, run_id: str, ctx : WorkspaceWriterDep, db: 
     run = _get_run(db, project, run_id)
     try:
         run = reject_pipeline_run(db, run, reason=body.comment if body else None)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return summarize_run(db, run)
+
+
+@router.post("/projects/{project_id}/runs/{run_id}/cancel", response_model=PipelineRunSummaryResponse)
+def cancel_pipeline(project_id: str, run_id: str, ctx: WorkspaceWriterDep, db: DbDep, body: PipelineApprovalRequest | None = None):
+    """Cancel a stuck or unwanted running pipeline."""
+    project = _get_project(db, ctx.workspace_id, project_id)
+    run = _get_run(db, project, run_id)
+    try:
+        run = cancel_running_pipeline_run(db, run, reason=body.comment if body else None)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return summarize_run(db, run)
