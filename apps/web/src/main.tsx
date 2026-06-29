@@ -7,7 +7,14 @@ import "./index.css";
 import { AuthProvider } from "@/context/AuthContext";
 
 const queryClient = new QueryClient({
-  defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
+  defaultOptions: {
+    queries: {
+      retry: 1,
+      refetchOnWindowFocus: false,
+      refetchOnReconnect: true,
+      staleTime: 30_000,
+    },
+  },
 });
 
 createRoot(document.getElementById("root")!).render(
