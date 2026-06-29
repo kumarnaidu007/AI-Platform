@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -130,19 +131,43 @@ def require_llm_config(db: Session) -> dict[str, Any]:
     return config
 
 
+def _repair_truncated_json(text: str) -> dict[str, Any] | None:
+    """Best-effort repair when the model hits the output token limit mid-JSON."""
+    start = text.find("{")
+    if start < 0:
+        return None
+    fragment = text[start:]
+    for _ in range(12):
+        try:
+            return json.loads(fragment)
+        except json.JSONDecodeError:
+            fragment = fragment.rstrip().rstrip(",")
+            if fragment.endswith('"'):
+                fragment += '"}'
+            elif fragment.count('"') % 2 == 1:
+                fragment += '"'
+            open_braces = fragment.count("{") - fragment.count("}")
+            open_brackets = fragment.count("[") - fragment.count("]")
+            fragment += "]" * max(open_brackets, 0)
+            fragment += "}" * max(open_braces, 0)
+    return None
+
+
 def _extract_json(text: str) -> dict[str, Any] | None:
     text = text.strip()
     if text.startswith("{"):
         try:
             return json.loads(text)
         except json.JSONDecodeError:
-            pass
+            repaired = _repair_truncated_json(text)
+            if repaired:
+                return repaired
     match = re.search(r"\{[\s\S]*\}", text)
     if match:
         try:
             return json.loads(match.group())
         except json.JSONDecodeError:
-            return None
+            return _repair_truncated_json(match.group())
     return None
 
 
@@ -152,37 +177,82 @@ def _estimate_cost(provider: str, model: str, input_tokens: int, output_tokens: 
     return round((input_tokens * 0.15 + output_tokens * 0.6) / 1_000_000, 6)
 
 
+def _is_transient_http_error(exc: BaseException) -> bool:
+    """True when the LLM call may succeed on retry (network blip, gateway timeout)."""
+    if isinstance(exc, (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (408, 429, 500, 502, 503, 504):
+        return True
+    msg = str(exc).lower()
+    return any(
+        phrase in msg
+        for phrase in (
+            "server disconnected",
+            "connection reset",
+            "connection aborted",
+            "broken pipe",
+            "temporarily unavailable",
+            "rate limit",
+        )
+    )
+
+
 def complete_json(
     db: Session,
     *,
     system: str,
     user: str,
+    max_completion_tokens: int | None = None,
+    retries: int = 2,
 ) -> LLMResponse:
     config = require_llm_config(db)
     provider = config["provider"]
     model = config["model"]
     api_key = config["api_key"]
+    last: LLMResponse | None = None
+    prompt = user
+    attempts = max(1, retries)
 
-    if provider == "azure_foundry":
-        return _call_openai_compatible(
-            api_key,
-            model,
-            system,
-            user,
-            base_url=config["endpoint"],
-            provider_label="azure_foundry",
-            use_max_completion_tokens=True,
-        )
-    if provider == "openai":
-        return _call_openai_compatible(
-            api_key,
-            model,
-            system,
-            user,
-            base_url="https://api.openai.com/v1",
-            provider_label="openai",
-        )
-    return _call_anthropic(api_key, model, system, user)
+    for attempt in range(attempts):
+        try:
+            if provider == "azure_foundry":
+                last = _call_openai_compatible(
+                    api_key,
+                    model,
+                    system,
+                    prompt,
+                    base_url=config["endpoint"],
+                    provider_label="azure_foundry",
+                    use_max_completion_tokens=True,
+                    max_completion_tokens=max_completion_tokens or 8192,
+                )
+            elif provider == "openai":
+                last = _call_openai_compatible(
+                    api_key,
+                    model,
+                    system,
+                    prompt,
+                    base_url="https://api.openai.com/v1",
+                    provider_label="openai",
+                    max_completion_tokens=max_completion_tokens or 8192,
+                )
+            else:
+                last = _call_anthropic(api_key, model, system, prompt)
+        except Exception as exc:
+            if _is_transient_http_error(exc) and attempt < attempts - 1:
+                time.sleep(min(2 ** attempt * 2, 30))
+                continue
+            raise
+
+        if last.parsed_json:
+            return last
+        if attempt < attempts - 1:
+            prompt = (
+                f"{user}\n\n"
+                "Your previous response was not valid JSON. Return a single valid JSON object only. "
+                "Do not include markdown fences or commentary."
+            )
+    return last  # type: ignore[return-value]
 
 
 def _call_anthropic(api_key: str, model: str, system: str, user: str) -> LLMResponse:
@@ -239,6 +309,7 @@ def _call_openai_compatible(
     base_url: str,
     provider_label: str,
     use_max_completion_tokens: bool = False,
+    max_completion_tokens: int = 8192,
 ) -> LLMResponse:
     payload: dict[str, Any] = {
         "model": model,
@@ -249,9 +320,13 @@ def _call_openai_compatible(
         "response_format": {"type": "json_object"},
     }
     if use_max_completion_tokens:
-        payload["max_completion_tokens"] = 8192
+        payload["max_completion_tokens"] = max_completion_tokens
+    else:
+        payload["max_tokens"] = max_completion_tokens
     url = f"{base_url.rstrip('/')}/chat/completions"
-    with httpx.Client(timeout=120) as client:
+    # Long timeout — Azure Foundry can be slow on large JSON codegen responses.
+    timeout = httpx.Timeout(connect=30.0, read=300.0, write=60.0, pool=30.0)
+    with httpx.Client(timeout=timeout) as client:
         resp = client.post(
             url,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
