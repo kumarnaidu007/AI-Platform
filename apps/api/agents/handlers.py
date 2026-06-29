@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -13,7 +14,6 @@ from services.agent_tools import run_tools
 from services.e2b_service import run_tests_in_sandbox
 from services.github_service import (
     GitHubError,
-    apply_code_changes,
     extract_pull_number,
     get_github_access_token,
     get_github_connection,
@@ -22,6 +22,8 @@ from services.github_service import (
     resolve_base_branch,
     verify_repo_access,
 )
+from services.code_writer_service import generate_pending_publish
+from services.codegen_validation_service import validate_pending_publish
 from services.llm import LLMResponse, complete_json
 from services.rag_service import format_rag_context, retrieve_context
 
@@ -30,9 +32,6 @@ SYSTEM_JSON = (
     "Respond with valid JSON only, no markdown fences."
 )
 
-
-class ReviewRejected(RuntimeError):
-    pass
 
 
 @dataclass
@@ -54,6 +53,17 @@ def _run_agent(
     if not llm.parsed_json:
         raise RuntimeError(f"{agent_key} agent returned invalid JSON from the LLM")
     return AgentRunResult(output=output, llm=llm, summary=output.get("summary", f"{agent_key} completed"))
+
+
+def _resolve_feature_branch(ctx: PipelineContext, llm_branch: str | None, *, fallback: str) -> str:
+    """One branch per ticket/run — review retries update the same branch, never spawn -retryN branches."""
+    pinned = ctx.additional_context.get("feature_branch")
+    if pinned:
+        return str(pinned)
+    previous = (ctx.pending_publish or {}).get("branch_name")
+    if previous:
+        return str(previous)
+    return llm_branch or fallback
 
 
 def _prepare_context(db: Session, ctx: PipelineContext) -> None:
@@ -151,78 +161,62 @@ def run_code_writer(db: Session, ctx: PipelineContext) -> AgentRunResult:
     repo_ref = parse_repo_url(ctx.repo_url)
     base_branch = resolve_base_branch(token, repo_ref, ctx.requirements_text, repo_info)
 
-    tasks = ctx.tasks or []
-    arch = ctx.architecture or {}
-    ctx.rag_hits = retrieve_context(
+    pending_publish, llm = generate_pending_publish(
         db,
-        project_id=ctx.project_id,
-        query=f"{ctx.requirements_text}\n{arch.get('summary', '')}",
-        top_k=10,
-    )
-    prompt = f"""Agent: code_writer
-Project: {ctx.project_name}
-Stack: {ctx.project_stack_summary()}
-Repository: {ctx.repo_url}
-Base branch: {base_branch}
-Tasks: {tasks[:6]}
-Architecture endpoints: {arch.get('api_endpoints', [])}
-Requirements: {ctx.requirements_text[:3000]}
-Review retry: {ctx.review_retry_count}
-{ctx.rag_context_block()}
-
-Generate implementation files. Use existing code patterns from context.
-Return JSON with keys:
-branch_name, pr_title, pr_body, summary,
-files (array of {{path, content, message}}) with complete file contents."""
-    plan_result = _run_agent(db, ctx, agent_key="code_writer", user_prompt=prompt)
-    plan = plan_result.output
-    files = plan.get("files") or []
-    if not files:
-        raise RuntimeError("Code writer agent did not return any files to commit")
-
-    branch_name = plan.get("branch_name") or f"feature/ai-{ctx.run_id.hex[:8]}"
-    if ctx.review_retry_count:
-        branch_name = f"{branch_name}-retry{ctx.review_retry_count}"
-    pr_data = apply_code_changes(
-        token,
-        ctx.repo_url,
+        ctx,
+        token=token,
+        repo_ref=repo_ref,
         base_branch=base_branch,
-        branch_name=branch_name,
-        files=files,
-        pr_title=plan.get("pr_title") or f"feat: {ctx.project_name} AI implementation",
-        pr_body=plan.get("pr_body") or plan.get("summary") or ctx.requirements_text[:4000],
     )
-    ctx.pull_requests = [pr_data]
-    artifact_service.save_pull_request(db, ctx.project_id, pr_data)
-    jira_key = (ctx.jira_issue or {}).get("key") or ctx.additional_context.get("jira_issue_key")
-    if jira_key and pr_data.get("url"):
-        try:
-            from services.jira_service import notify_jira_pr_created
-
-            notify_jira_pr_created(
-                db,
-                workspace_id=ctx.workspace_id,
-                user_id=ctx.user_id,
-                issue_key=jira_key,
-                pr_title=pr_data.get("title") or plan.get("pr_title") or "Pull request",
-                pr_url=str(pr_data.get("url")),
-                summary=plan.get("summary"),
-            )
-        except Exception as exc:
-            import logging
-
-            logging.getLogger(__name__).warning("Failed to update Jira issue %s: %s", jira_key, exc)
+    branch_name = _resolve_feature_branch(ctx, pending_publish.get("branch_name"), fallback=pending_publish["branch_name"])
+    pending_publish["branch_name"] = branch_name
+    ctx.pending_publish = pending_publish
     return AgentRunResult(
-        output={"pull_requests": [pr_data], "summary": pr_data.get("summary", "Pull request created")},
-        llm=plan_result.llm,
-        summary=pr_data.get("summary", "Pull request created on GitHub"),
+        output={"pending_publish": pending_publish, "summary": pending_publish["summary"]},
+        llm=llm,
+        summary="Code changes prepared — awaiting your approval before push",
     )
 
 
 def run_review(db: Session, ctx: PipelineContext) -> AgentRunResult:
+    pending = ctx.pending_publish or {}
+    files = pending.get("files") or []
+
+    blocking = validate_pending_publish(ctx, files)
+    ctx.last_validation_issues = blocking
+    if not blocking:
+        return AgentRunResult(
+            output={
+                "reviews": [
+                    {
+                        "verdict": "approved",
+                        "summary": "Deterministic validation passed",
+                        "comments": [],
+                    }
+                ]
+            },
+            llm=LLMResponse(
+                content="",
+                parsed_json=None,
+                input_tokens=0,
+                output_tokens=0,
+                cost_usd=0.0,
+                model_name="deterministic",
+                provider="local",
+            ),
+            summary="Deterministic validation passed",
+        )
+
     prs = ctx.pull_requests or []
     diff_excerpt = ""
-    if prs and ctx.repo_url:
+    if pending.get("files"):
+        chunks: list[str] = []
+        for item in pending["files"][:20]:
+            path = item.get("path", "unknown")
+            content = item.get("content", "")
+            chunks.append(f"--- {path} ---\n{content[:2500]}")
+        diff_excerpt = "\n\n".join(chunks)[:12000]
+    elif prs and ctx.repo_url:
         conn = get_github_connection(db, ctx.workspace_id, ctx.user_id)
         token = get_github_access_token(conn)
         repo_ref = parse_repo_url(ctx.repo_url)
@@ -230,17 +224,34 @@ def run_review(db: Session, ctx: PipelineContext) -> AgentRunResult:
         if pr_number:
             diff_excerpt = get_pull_request_diff(token, repo_ref, int(pr_number))[:12000]
 
+    plan = ctx.additional_context.get("implementation_plan") or {}
+    contracts = ""
+    if isinstance(plan, dict) and plan.get("technical_contracts"):
+        contracts = f"\nMandatory technical contracts:\n{json.dumps(plan['technical_contracts'], indent=2)[:5000]}"
+
     prompt = f"""Agent: review
-Pull requests: {prs}
+You are a strict but fair code reviewer. Approve when the code matches the implementation plan and would compile.
+
+Deterministic validation already found these BLOCKING issues — verify and expand only if needed:
+{json.dumps(blocking[:12], indent=2)}
+
+ONLY return verdict "changes_requested" for BLOCKING issues:
+- Interface/method signature mismatch between files
+- Wrong JSON root shape vs plan contracts
+- Missing types or methods referenced by other generated files
+- Would fail to compile
+
+Do NOT reject for: style, comments, documentation length, minor naming, or optional improvements.
+
+Proposed branch: {pending.get('branch_name', 'n/a')}
+Files to publish: {[f.get('path') for f in (pending.get('files') or [])[:20]]}
+{contracts}
 Diff excerpt:
 {diff_excerpt or 'Diff unavailable.'}
 {ctx.rag_context_block()}
 
-Return JSON with key reviews: array of {{pr_title, verdict (approved|changes_requested), comments (array), summary}}."""
+Return JSON with key reviews: array of {{pr_title, verdict (approved|changes_requested), comments (array of specific blocking issues), summary}}."""
     result = _run_agent(db, ctx, agent_key="review", user_prompt=prompt)
-    verdict = (result.output.get("reviews") or [{}])[0].get("verdict", "approved")
-    if verdict == "changes_requested":
-        raise ReviewRejected((result.output.get("reviews") or [{}])[0].get("summary", "Changes requested"))
     return result
 
 
