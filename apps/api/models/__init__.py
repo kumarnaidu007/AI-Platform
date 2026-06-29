@@ -247,3 +247,14 @@ class UsageLedger(Base, TimestampMixin):
     input_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     cost_usd: Mapped[float] = mapped_column(Numeric(12, 6), default=0, nullable=False)
+
+
+from models.requirements import (  # noqa: E402
+    ClarificationAnswer,
+    ClarificationQuestion,
+    IntakeApproval,
+    JiraTicketIntake,
+    RequirementConversation,
+    RequirementDocument,
+    WorkspaceNotification,
+)
