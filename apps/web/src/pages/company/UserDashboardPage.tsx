@@ -1,6 +1,6 @@
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { FolderKanban, Plug, Sparkles } from "lucide-react";
+import { FolderKanban, Plug, Sparkles, Ticket } from "lucide-react";
 import { PageHeader } from "@/components/admin/PageHeader";
 import { StatCard } from "@/components/admin/StatCard";
 import { ConnectionStatusBadge } from "@/components/admin/ConnectionStatusBadge";
@@ -38,6 +38,25 @@ export function UserDashboardPage() {
         />
         <StatCard label="AI services available" value={data?.servicesEnabled ?? 0} icon={Sparkles} />
         <StatCard label="Company projects" value={data?.companyProjectsCount ?? 0} icon={FolderKanban} />
+      </div>
+
+      <div className="rounded-lg border border-primary/20 bg-primary/5 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="flex items-center gap-2 text-sm font-semibold">
+              <Ticket className="h-4 w-4" /> Jira requirements portal
+            </p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Pick a ticket, answer clarification questions, review separate specs, approve the plan, then implement.
+            </p>
+          </div>
+          <Link
+            to="/workspace/jira"
+            className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
+          >
+            Open Jira Portal
+          </Link>
+        </div>
       </div>
 
       {pendingIntegrations.length > 0 && (
