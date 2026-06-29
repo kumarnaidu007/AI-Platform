@@ -393,6 +393,21 @@ def test_my_integration(key: str, ctx : WorkspaceWriterDep, db: DbDep):
             }
             success = True
             message = f"Connected as {profile.get('login', 'GitHub user')}"
+        elif integration.integration_key == "jira":
+            from services.jira_service import call_with_jira_tokens, test_jira_token
+
+            profile = call_with_jira_tokens(
+                db,
+                conn,
+                lambda t: test_jira_token(t["access_token"], t["cloud_id"]),
+            )
+            conn.config_metadata_json = {
+                **(conn.config_metadata_json or {}),
+                "jira_display_name": profile.get("displayName", ""),
+                "jira_account_id": profile.get("accountId", ""),
+            }
+            success = True
+            message = f"Connected as {profile.get('displayName', 'Jira user')}"
         else:
             success = bool(secrets or conn.config_metadata_json)
             message = "Connection verified successfully" if success else "Connection test failed"
