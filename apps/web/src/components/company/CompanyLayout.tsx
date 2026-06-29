@@ -1,9 +1,10 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { Bot, FolderKanban, LayoutDashboard, LogOut, Plug, Settings, Sparkles, User, Users } from "lucide-react";
+import { Bell, Bot, FolderKanban, LayoutDashboard, LogOut, Plug, Settings, Sparkles, Ticket, User, Users } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/context/AuthContext";
 import { formatRole, isTeamLead } from "@/types/roles";
+import { NotificationBell } from "@/components/company/NotificationBell";
 
 type NavItem = { to: string; label: string; icon: LucideIcon; end?: boolean; teamLeadOnly?: boolean };
 
@@ -22,6 +23,8 @@ export function CompanyLayout() {
 
   const navItems: NavItem[] = [
     { to: "/workspace", label: "Dashboard", icon: LayoutDashboard, end: true },
+    { to: "/workspace/jira", label: "Jira Portal", icon: Ticket },
+    { to: "/workspace/notifications", label: "Notifications", icon: Bell },
     { to: "/workspace/projects", label: "Projects", icon: FolderKanban },
     { to: "/workspace/integrations", label: "My Integrations", icon: Plug },
     { to: "/workspace/my-agents", label: "My Agents", icon: Bot },
@@ -96,6 +99,9 @@ export function CompanyLayout() {
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
+        <header className="flex h-14 shrink-0 items-center justify-end border-b px-6">
+          <NotificationBell />
+        </header>
         <main className="flex-1 p-6 lg:p-8">
           <Outlet />
         </main>
