@@ -9,7 +9,9 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from agents.context import PipelineContext
-from agents.handlers import AGENT_RUNNERS, AgentRunResult, ReviewRejected
+from agents.handlers import AGENT_RUNNERS, AgentRunResult
+from services.codegen_validation_service import should_skip_llm_review, validate_pending_publish
+from services.llm import LLMResponse
 
 logger = logging.getLogger(__name__)
 
@@ -151,17 +153,110 @@ def _run_review_loop(
         if not include_review:
             return
 
+        files = (ctx.pending_publish or {}).get("files") or []
+        blocking = validate_pending_publish(ctx, files)
+        ctx.last_validation_issues = blocking
+
+        if not blocking:
+            before_step("review")
+            approved = AgentRunResult(
+                output={
+                    "reviews": [
+                        {
+                            "verdict": "approved",
+                            "summary": "Deterministic validation passed",
+                            "comments": [],
+                        }
+                    ]
+                },
+                llm=LLMResponse(
+                    content="",
+                    parsed_json=None,
+                    input_tokens=0,
+                    output_tokens=0,
+                    cost_usd=0.0,
+                    model_name="deterministic",
+                    provider="local",
+                ),
+                summary="Deterministic validation passed",
+            )
+            after_step("review", approved)
+            ctx.last_review_output = approved.output
+            return
+
+        if should_skip_llm_review(ctx):
+            feedback = {
+                "attempt": attempt,
+                "summary": f"Deterministic validation failed ({len(blocking)} issues)",
+                "comments": [f"{i['file']}: {i['issue']}" for i in blocking[:12]],
+            }
+            ctx.review_feedback.append(feedback)
+            before_step("review")
+            rejected = AgentRunResult(
+                output={
+                    "reviews": [
+                        {
+                            "verdict": "changes_requested",
+                            "summary": feedback["summary"],
+                            "comments": feedback["comments"],
+                        }
+                    ]
+                },
+                llm=LLMResponse(
+                    content="",
+                    parsed_json=None,
+                    input_tokens=0,
+                    output_tokens=0,
+                    cost_usd=0.0,
+                    model_name="deterministic",
+                    provider="local",
+                ),
+                summary=feedback["summary"],
+            )
+            after_step("review", rejected)
+            ctx.last_review_output = rejected.output
+            logger.info(
+                "Deterministic validation failed — partial regen (attempt %s/%s)",
+                attempt + 1,
+                MAX_REVIEW_RETRIES,
+            )
+            continue
+
         before_step("review")
-        try:
-            review_result = AGENT_RUNNERS["review"](db, ctx)
-            after_step("review", review_result)
-            verdict = (review_result.output.get("reviews") or [{}])[0].get("verdict", "approved")
-            if verdict != "changes_requested":
-                return
-            logger.info("Review requested changes (attempt %s/%s)", attempt + 1, MAX_REVIEW_RETRIES)
-        except ReviewRejected:
-            logger.info("Review rejected (attempt %s/%s)", attempt + 1, MAX_REVIEW_RETRIES)
-    raise RuntimeError(f"Code review failed after {MAX_REVIEW_RETRIES} attempts")
+        review_result = AGENT_RUNNERS["review"](db, ctx)
+        after_step("review", review_result)
+        ctx.last_review_output = review_result.output
+        review_entry = (review_result.output.get("reviews") or [{}])[0]
+        verdict = review_entry.get("verdict", "approved")
+        if verdict == "changes_requested":
+            ctx.review_feedback.append(
+                {
+                    "attempt": attempt,
+                    "summary": review_entry.get("summary", "Changes requested"),
+                    "comments": review_entry.get("comments") or [],
+                }
+            )
+            logger.info(
+                "Review requested changes — revising code (attempt %s/%s): %s",
+                attempt + 1,
+                MAX_REVIEW_RETRIES,
+                review_entry.get("summary", "")[:200],
+            )
+            continue
+        return
+    raise RuntimeError(
+        f"Code review failed after {MAX_REVIEW_RETRIES} attempts"
+        + (
+            f": {ctx.review_feedback[-1].get('summary', '')[:500]}"
+            if ctx.review_feedback
+            else ""
+        )
+        + (
+            f" | validation: {ctx.last_validation_issues[:5]}"
+            if ctx.last_validation_issues
+            else ""
+        )
+    )
 
 
 def _run_parallel_batch(
