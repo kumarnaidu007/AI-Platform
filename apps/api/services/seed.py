@@ -157,7 +157,48 @@ def _apply_schema_patches(db: Session) -> None:
             "review_retry_count INTEGER NOT NULL DEFAULT 0"
         )
     )
+    _apply_requirements_schema(db)
+    _apply_encrypted_config_text(db)
+    _apply_pending_publish_schema(db)
     db.commit()
+
+
+def _apply_pending_publish_schema(db: Session) -> None:
+    from pathlib import Path
+
+    from sqlalchemy import text
+
+    path = Path(__file__).resolve().parent / "migrations" / "17_pending_publish.sql"
+    if path.exists():
+        db.execute(text(path.read_text(encoding="utf-8")))
+
+
+def _apply_encrypted_config_text(db: Session) -> None:
+    from pathlib import Path
+
+    from sqlalchemy import text
+
+    path = Path(__file__).resolve().parent / "migrations" / "16_encrypted_config_text.sql"
+    if path.exists():
+        db.execute(text(path.read_text(encoding="utf-8")))
+
+
+def _apply_requirements_schema(db: Session) -> None:
+    from sqlalchemy import text
+
+    db.execute(text(open(_requirements_sql_path(), encoding="utf-8").read()))
+
+
+def _requirements_sql_path() -> str:
+    from pathlib import Path
+
+    local = Path(__file__).resolve().parent / "migrations" / "15_requirements_intake.sql"
+    if local.exists():
+        return str(local)
+    repo = Path(__file__).resolve().parents[3] / "infra" / "db" / "init" / "15_requirements_intake.sql"
+    if repo.exists():
+        return str(repo)
+    raise FileNotFoundError("15_requirements_intake.sql not found")
 
 
 def bootstrap_platform(db: Session) -> None:
