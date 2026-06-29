@@ -304,6 +304,28 @@ def upsert_file(
     _request("PUT", f"/repos/{ref.full_name}/contents/{path}", token, json=payload)
 
 
+def get_pull_request(token: str, ref: RepoRef, pull_number: int) -> dict[str, Any]:
+    return _request("GET", f"/repos/{ref.full_name}/pulls/{pull_number}", token)
+
+
+def find_open_pull_request(
+    token: str,
+    ref: RepoRef,
+    *,
+    head_branch: str,
+    base_branch: str,
+) -> dict[str, Any] | None:
+    data = _request(
+        "GET",
+        f"/repos/{ref.full_name}/pulls",
+        token,
+        params={"head": f"{ref.owner}:{head_branch}", "base": base_branch, "state": "open"},
+    )
+    if isinstance(data, list) and data:
+        return data[0]
+    return None
+
+
 def create_pull_request(
     token: str,
     ref: RepoRef,
@@ -318,6 +340,38 @@ def create_pull_request(
         f"/repos/{ref.full_name}/pulls",
         token,
         json={"title": title, "body": body, "head": head, "base": base},
+    )
+
+
+def request_pr_reviewers(
+    token: str,
+    ref: RepoRef,
+    pull_number: int,
+    reviewers: list[str],
+) -> None:
+    cleaned = [r.strip().lstrip("@") for r in reviewers if r and r.strip()]
+    if not cleaned:
+        return
+    _request(
+        "POST",
+        f"/repos/{ref.full_name}/pulls/{pull_number}/requested_reviewers",
+        token,
+        json={"reviewers": cleaned},
+    )
+
+
+def merge_pull_request(
+    token: str,
+    ref: RepoRef,
+    pull_number: int,
+    *,
+    merge_method: str = "squash",
+) -> dict[str, Any]:
+    return _request(
+        "PUT",
+        f"/repos/{ref.full_name}/pulls/{pull_number}/merge",
+        token,
+        json={"merge_method": merge_method},
     )
 
 
@@ -453,8 +507,9 @@ def apply_code_changes(
     pr_body: str,
 ) -> dict[str, Any]:
     ref = parse_repo_url(repo_url)
-    repo_info = verify_repo_access(token, repo_url)
-    create_branch(token, ref, base_branch=base_branch, new_branch=branch_name)
+    verify_repo_access(token, repo_url)
+    if not branch_exists(token, ref, branch_name):
+        create_branch(token, ref, base_branch=base_branch, new_branch=branch_name)
     changed_paths: list[str] = []
     for item in files:
         path = item.get("path", "").lstrip("/")
@@ -469,7 +524,8 @@ def apply_code_changes(
             message=item.get("message") or f"feat: update {path}",
         )
         changed_paths.append(path)
-    pr = create_pull_request(
+    existing_pr = find_open_pull_request(token, ref, head_branch=branch_name, base_branch=base_branch)
+    pr = existing_pr or create_pull_request(
         token,
         ref,
         title=pr_title,
