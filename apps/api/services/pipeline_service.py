@@ -208,6 +208,95 @@ def reject_pipeline_run(db: Session, run: PipelineRun, reason: str | None = None
     return run
 
 
+def cancel_running_pipeline_run(
+    db: Session,
+    run: PipelineRun,
+    *,
+    reason: str | None = None,
+) -> PipelineRun:
+    """Cancel a pending/running pipeline (e.g. worker restart left it stuck)."""
+    if run.status not in ("pending", "running"):
+        raise ValueError(f"Cannot cancel pipeline with status '{run.status}'")
+
+    steps = (
+        db.query(PipelineStep)
+        .filter(PipelineStep.pipeline_run_id == run.id)
+        .order_by(PipelineStep.step_order.asc())
+        .all()
+    )
+    message = reason or "Cancelled by user"
+    for step in steps:
+        if step.status == "running":
+            step.status = "failed"
+            step.finished_at = datetime.now(UTC)
+            step.error_message = message
+        elif step.status == "pending":
+            step.status = "skipped"
+            step.finished_at = datetime.now(UTC)
+            step.error_message = "Skipped — pipeline was cancelled"
+
+    run.status = "failed"
+    run.current_step = None
+    run.error_message = message
+    run.finished_at = datetime.now(UTC)
+
+    from models.requirements import JiraTicketIntake
+
+    intake = db.query(JiraTicketIntake).filter(JiraTicketIntake.pipeline_run_id == run.id).first()
+    if intake and intake.status == "implementing":
+        intake.status = "implementation_failed"
+
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+def reconcile_stuck_pipeline_run(
+    db: Session,
+    run: PipelineRun,
+    *,
+    stale_minutes: int = 8,
+) -> PipelineRun:
+    """Mark runs as failed when the worker died mid-step (no log activity)."""
+    if run.status != "running":
+        return run
+
+    steps = (
+        db.query(PipelineStep)
+        .filter(PipelineStep.pipeline_run_id == run.id)
+        .order_by(PipelineStep.step_order.asc())
+        .all()
+    )
+    step_map = {s.step_name: s for s in steps}
+    active = step_map.get(run.current_step or "")
+    if not active or not active.started_at:
+        return run
+
+    idle_seconds = (datetime.now(UTC) - active.started_at).total_seconds()
+    if idle_seconds < stale_minutes * 60:
+        return run
+
+    latest_log = (
+        db.query(AgentLog)
+        .filter(AgentLog.pipeline_step_id == active.id)
+        .order_by(AgentLog.created_at.desc())
+        .first()
+    )
+    if latest_log and latest_log.created_at:
+        log_age = (datetime.now(UTC) - latest_log.created_at).total_seconds()
+        if log_age < stale_minutes * 60:
+            return run
+
+    return cancel_running_pipeline_run(
+        db,
+        run,
+        reason=(
+            "Pipeline interrupted — no progress detected (worker may have restarted). "
+            "Start a new implementation run."
+        ),
+    )
+
+
 def _mark_run_failed(
     run: PipelineRun,
     steps: list[PipelineStep],
@@ -215,21 +304,105 @@ def _mark_run_failed(
     failed_agent_key: str | None,
     exc: Exception,
 ) -> None:
-    """Mark the failing step and skip any steps that never ran."""
+    """Mark the failing step and skip any steps that never ran or were left running."""
     failed_step = step_map.get(failed_agent_key or "")
     if failed_step:
-        if failed_step.status == "running":
-            failed_step.status = "failed"
-            failed_step.finished_at = datetime.now(UTC)
-            failed_step.error_message = str(exc)
+        failed_step.status = "failed"
+        failed_step.finished_at = datetime.now(UTC)
+        failed_step.error_message = str(exc)
     for step in steps:
-        if step.status == "pending":
+        if step is failed_step:
+            continue
+        if step.status in ("pending", "running"):
             step.status = "skipped"
             step.finished_at = datetime.now(UTC)
             step.error_message = "Skipped — pipeline stopped after earlier failure"
     run.status = "failed"
+    run.current_step = None
     run.error_message = str(exc)
     run.finished_at = datetime.now(UTC)
+
+
+def _sync_intake_after_pipeline(
+    db: Session,
+    additional_context: dict,
+    *,
+    success: bool,
+    ctx: PipelineContext | None = None,
+    error_message: str | None = None,
+) -> None:
+    from uuid import UUID as _UUID
+
+    from models.requirements import JiraTicketIntake
+    from services.notification_service import notify_user
+
+    raw_intake_id = additional_context.get("intake_id")
+    if not raw_intake_id:
+        return
+    intake_row = db.query(JiraTicketIntake).filter(JiraTicketIntake.id == _UUID(str(raw_intake_id))).first()
+    if not intake_row:
+        return
+
+    if success and ctx:
+        intake_row.status = "awaiting_pr_review"
+        if ctx.pending_publish:
+            intake_row.pending_publish_json = ctx.pending_publish
+            intake_row.feature_branch = ctx.pending_publish.get("branch_name")
+            intake_row.base_branch = ctx.pending_publish.get("base_branch")
+        notify_user(
+            db,
+            workspace_id=intake_row.workspace_id,
+            user_id=intake_row.user_id,
+            notification_type="pr_review_needed",
+            title=f"{intake_row.jira_issue_key}: code ready for your review",
+            body="Review the proposed file changes, then create the PR and push when you approve.",
+            link_path=f"/workspace/jira/{intake_row.jira_issue_key}",
+            intake_id=intake_row.id,
+        )
+    elif not success:
+        intake_row.status = "implementation_failed"
+        notify_user(
+            db,
+            workspace_id=intake_row.workspace_id,
+            user_id=intake_row.user_id,
+            notification_type="implementation_failed",
+            title=f"{intake_row.jira_issue_key}: implementation failed",
+            body=error_message or "The agent pipeline failed. You can retry implementation from the ticket workspace.",
+            link_path=f"/workspace/jira/{intake_row.jira_issue_key}",
+            intake_id=intake_row.id,
+        )
+
+
+def _make_code_writer_progress_callback(step_id: UUID):
+    """Thread-safe incremental logs while code_writer runs (separate DB session per write)."""
+    from db.session import SessionLocal
+
+    lock = threading.Lock()
+
+    def callback(event: str, payload: dict) -> None:
+        with lock:
+            prog_db = SessionLocal()
+            try:
+                prog_db.add(
+                    AgentLog(
+                        pipeline_step_id=step_id,
+                        agent_name="code_writer",
+                        input_json={"event": event, **payload},
+                        output_json={"event": event, "status": "in_progress", **payload},
+                        input_tokens=0,
+                        output_tokens=0,
+                        cost_usd=0,
+                        model_name="progress",
+                    )
+                )
+                prog_db.commit()
+            except Exception as exc:
+                logger.warning("Failed to write code_writer progress log: %s", exc)
+                prog_db.rollback()
+            finally:
+                prog_db.close()
+
+    return callback
 
 
 def enqueue_pipeline_execution(run_id: str, requirements_text: str, additional_context: dict) -> None:
@@ -285,8 +458,13 @@ def execute_pipeline_run(run_id: str, requirements_text: str, additional_context
 
         approved = bool(additional_context.get("approved"))
         resume = bool(additional_context.get("resume"))
+        skip_planning = resume or bool(additional_context.get("skip_planning"))
 
-        if not resume and project.repo_url:
+        skip_rag = bool(additional_context.get("implementation_plan")) and (
+            bool(additional_context.get("skip_planning")) or bool(additional_context.get("intake_id"))
+        )
+
+        if not resume and project.repo_url and not skip_rag:
             try:
                 index_project_repo(
                     db,
@@ -323,14 +501,26 @@ def execute_pipeline_run(run_id: str, requirements_text: str, additional_context
         if run.graph_state_json:
             ctx = PipelineContext.from_checkpoint(ctx, run.graph_state_json)
 
-        configure_tracing(db)
-
         steps = sorted(run.steps, key=lambda s: s.step_order)
         agent_keys = [s.step_name for s in steps]
         step_map = {s.step_name: s for s in steps}
 
+        if "code_writer" in step_map:
+            ctx.progress_callback = _make_code_writer_progress_callback(step_map["code_writer"].id)
+
+        configure_tracing(db)
+
         def before_step(agent_key: str) -> None:
             step = step_map[agent_key]
+            if agent_key == "code_writer" and ctx.review_retry_count > 0:
+                db.query(AgentLog).filter(AgentLog.pipeline_step_id == step.id).delete()
+                review_step = step_map.get("review")
+                if review_step:
+                    review_step.status = "pending"
+                    review_step.started_at = None
+                    review_step.finished_at = None
+                    review_step.error_message = None
+                db.commit()
             step.status = "running"
             step.started_at = datetime.now(UTC)
             run.current_step = agent_key
@@ -340,12 +530,21 @@ def execute_pipeline_run(run_id: str, requirements_text: str, additional_context
             step = step_map[agent_key]
             step.status = "completed"
             step.finished_at = datetime.now(UTC)
-            step.retry_count = ctx.review_retry_count if agent_key == "review" else step.retry_count
+            step.retry_count = ctx.review_retry_count if agent_key in ("review", "code_writer") else step.retry_count
+
+            input_snapshot: dict = {
+                "requirements_preview": requirements_text[:500],
+                "tools": ctx.tool_results[-3:],
+                "review_retry_count": ctx.review_retry_count,
+            }
+            if agent_key == "code_writer" and ctx.review_feedback:
+                input_snapshot["review_feedback"] = ctx.review_feedback[-3:]
+
             db.add(
                 AgentLog(
                     pipeline_step_id=step.id,
                     agent_name=agent_key,
-                    input_json={"requirements_preview": requirements_text[:500], "tools": ctx.tool_results[-3:]},
+                    input_json=input_snapshot,
                     output_json=result.output,
                     input_tokens=result.llm.input_tokens,
                     output_tokens=result.llm.output_tokens,
@@ -377,13 +576,16 @@ def execute_pipeline_run(run_id: str, requirements_text: str, additional_context
                     agent_keys,
                     before_step=before_step,
                     after_step=after_step,
-                    skip_planning=resume,
+                    skip_planning=skip_planning,
                     approved=approved or resume,
                 )
             run.status = "completed"
             run.current_step = None
             run.finished_at = datetime.now(UTC)
             run.error_message = None
+            raw_intake_id = additional_context.get("intake_id")
+            if raw_intake_id:
+                _sync_intake_after_pipeline(db, additional_context, success=True, ctx=ctx)
             append_run_memory(
                 db,
                 project.id,
@@ -405,6 +607,12 @@ def execute_pipeline_run(run_id: str, requirements_text: str, additional_context
         except Exception as exc:
             logger.exception("Pipeline run %s failed at %s", run_id, run.current_step)
             _mark_run_failed(run, steps, step_map, run.current_step, exc)
+            _sync_intake_after_pipeline(
+                db,
+                additional_context,
+                success=False,
+                error_message=str(exc),
+            )
         db.commit()
     finally:
         db.close()
@@ -434,6 +642,7 @@ def _step_logs(db: Session, step_id: UUID) -> list[AgentLogResponse]:
 
 
 def get_run_detail(db: Session, run: PipelineRun) -> PipelineRunDetailResponse:
+    run = reconcile_stuck_pipeline_run(db, run)
     steps = (
         db.query(PipelineStep)
         .filter(PipelineStep.pipeline_run_id == run.id)
