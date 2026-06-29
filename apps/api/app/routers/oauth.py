@@ -3,8 +3,8 @@ from fastapi.responses import RedirectResponse
 
 from app.deps import DbDep
 from config import settings
-from services.github_service import complete_github_oauth
-from services.jira_service import complete_jira_oauth
+from services.github_service import complete_github_oauth, GitHubError
+from services.jira_service import JiraError, complete_jira_oauth
 
 router = APIRouter(prefix="/api/oauth", tags=["oauth"])
 
@@ -25,7 +25,7 @@ def github_oauth_callback(
         raise HTTPException(400, "Missing code or state")
     try:
         redirect_path = complete_github_oauth(db, state=state, code=code)
-    except ValueError as exc:
+    except (ValueError, GitHubError) as exc:
         return RedirectResponse(
             f"{settings.web_base_url}/workspace/integrations/github?github_error={str(exc)}",
             status_code=302,
@@ -50,7 +50,7 @@ def jira_oauth_callback(
         raise HTTPException(400, "Missing code or state")
     try:
         redirect_path = complete_jira_oauth(db, state=state, code=code)
-    except ValueError as exc:
+    except (ValueError, JiraError) as exc:
         return RedirectResponse(
             f"{settings.web_base_url}/workspace/integrations/jira?jira_error={str(exc)}",
             status_code=302,
