@@ -1,13 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import { CheckCircle2, Loader2, MessageSquare, FileText, Lock, Play, ShieldCheck } from "lucide-react";
+import { CheckCircle2, Loader2, MessageSquare, FileText, Lock, Play, ShieldCheck, ListTodo, Users } from "lucide-react";
 import { AgentRunPicker } from "@/components/company/AgentRunPicker";
+import { EpicProgressPanel } from "@/components/company/EpicProgressPanel";
 import { PipelineRunTracker } from "@/components/company/PipelineRunTracker";
 import { PendingChangesReview } from "@/components/company/PendingChangesReview";
 import { intakeApi, type ApprovePrPayload, type ClarificationQuestion } from "@/services/intakeApi";
 import { companyApi } from "@/services/companyApi";
 import { getApiErrorMessage } from "@/services/authApi";
+import { useAuth } from "@/context/AuthContext";
+import { isTeamLead } from "@/types/roles";
 import { defaultRunSelection, selectedAgentKeys } from "@/lib/agentRunUtils";
 import { POLL_INTAKE_MS, shouldPollIntake } from "@/lib/polling";
 import { cn } from "@/lib/utils";
@@ -112,6 +115,8 @@ function QuestionCard({
 export function CompanyTicketWorkspacePage() {
   const { issueKey } = useParams<{ issueKey: string }>();
   const queryClient = useQueryClient();
+  const { company } = useAuth();
+  const teamLead = isTeamLead(company?.role);
   const [activeCategory, setActiveCategory] = useState<string>("repo");
   const [activeDoc, setActiveDoc] = useState<string>("overview");
   const [viewStep, setViewStep] = useState<Step | null>(null);
@@ -236,6 +241,24 @@ export function CompanyTicketWorkspacePage() {
     onError: (e: unknown) => setError(getApiErrorMessage(e, "Reset failed")),
   });
 
+  const createJiraTasks = useMutation({
+    mutationFn: () => intakeApi.createJiraTasks(intake!.id),
+    onSuccess: () => { setError(null); invalidate(); },
+    onError: (e: unknown) => setError(getApiErrorMessage(e, "Failed to create Jira subtasks")),
+  });
+
+  const handoffSubtasks = useMutation({
+    mutationFn: () => intakeApi.handoffSubtasks(intake!.id),
+    onSuccess: () => { setError(null); invalidateWithNotifications(); },
+    onError: (e: unknown) => setError(getApiErrorMessage(e, "Handoff failed")),
+  });
+
+  const refreshJira = useMutation({
+    mutationFn: () => intakeApi.refreshJira(intake!.id),
+    onSuccess: () => { setError(null); invalidate(); },
+    onError: (e: unknown) => setError(getApiErrorMessage(e, "Jira refresh failed")),
+  });
+
   const sendChat = useMutation({
     mutationFn: () => intakeApi.postConversation(intake!.id, chatMessage),
     onSuccess: () => { setChatMessage(""); setError(null); invalidate(); },
@@ -252,6 +275,8 @@ export function CompanyTicketWorkspacePage() {
 
   const activeQuestions = questionsByCategory[activeCategory] ?? [];
   const activeDocument = intake?.documents.find((d) => d.docType === activeDoc);
+  const isLeadPlanning = intake?.intakeMode === "lead_planning";
+  const createdTasks = (intake?.jiraTasks?.created as { key?: string; summary?: string }[] | undefined) ?? [];
 
   if (intakeQuery.isLoading) {
     return (
@@ -278,7 +303,34 @@ export function CompanyTicketWorkspacePage() {
             {intake.jiraIssueKey}
             <span className="ml-2 text-base font-normal text-muted-foreground">{intake.jiraSummary}</span>
           </h1>
-          <p className="mt-1 text-sm capitalize text-muted-foreground">Status: {intake.status.replace(/_/g, " ")}</p>
+          <p className="mt-1 text-sm capitalize text-muted-foreground">
+            Platform: {intake.status.replace(/_/g, " ")}
+            {intake.jiraStatus && (
+              <>
+                {" "}
+                · Jira: {intake.jiraStatus}
+                <button
+                  type="button"
+                  onClick={() => refreshJira.mutate()}
+                  disabled={refreshJira.isPending}
+                  className="ml-2 text-xs text-primary underline"
+                >
+                  {refreshJira.isPending ? "Syncing…" : "Sync Jira"}
+                </button>
+              </>
+            )}
+          </p>
+          {isLeadPlanning && (
+            <p className="mt-1 text-xs font-medium text-primary">Team lead planning mode — create subtasks, then hand off to members</p>
+          )}
+          {intake.parentJiraKey && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Subtask of epic{" "}
+              <Link to={`/workspace/jira/${intake.parentJiraKey}`} className="text-primary underline">
+                {intake.parentJiraKey}
+              </Link>
+            </p>
+          )}
         </div>
         {intake.jiraUrl && (
           <a href={intake.jiraUrl} target="_blank" rel="noreferrer" className="text-sm text-primary underline">
@@ -305,11 +357,20 @@ export function CompanyTicketWorkspacePage() {
 
       {intake.status === "awaiting_plan_approval" && (
         <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
-          Review the implementation plan below, then click <strong>Confirm plan</strong> to proceed. After that, click{" "}
-          <strong>Start implementation</strong> to run the agents.
+          {isLeadPlanning ? (
+            <>
+              Review the implementation plan, then <strong>Confirm plan</strong>. Next:{" "}
+              <strong>Create Jira subtasks</strong> and <strong>Hand off to team</strong>.
+            </>
+          ) : (
+            <>
+              Review the implementation plan below, then click <strong>Confirm plan</strong> to proceed. After that, click{" "}
+              <strong>Start implementation</strong> to run the agents.
+            </>
+          )}
         </div>
       )}
-      {intake.status === "approved" && (
+      {intake.status === "approved" && !isLeadPlanning && (
         <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
           Plan confirmed. Choose agents below, then click <strong>Start implementation</strong>.
         </div>
@@ -328,6 +389,12 @@ export function CompanyTicketWorkspacePage() {
       )}
 
       {error && <p className="text-sm text-red-600">{error}</p>}
+
+      {isLeadPlanning && intake.jiraIssueKey && (
+        <EpicProgressPanel parentKey={intake.jiraIssueKey} />
+      )}
+
+      {intake.parentJiraKey && <EpicProgressPanel parentKey={intake.parentJiraKey} />}
 
       {/* QUESTIONS */}
       {currentStep === "questions" && intake.questions.length > 0 && (
@@ -509,7 +576,7 @@ export function CompanyTicketWorkspacePage() {
               </button>
             </div>
           )}
-          {(intake.status === "approved" || intake.status === "implementation_failed") && (
+          {(intake.status === "approved" || intake.status === "implementation_failed") && !isLeadPlanning && (
             <div className="mt-4 space-y-4 border-t pt-4">
               {!intake.projectId ? (
                 <p className="text-sm text-amber-700">
@@ -552,11 +619,51 @@ export function CompanyTicketWorkspacePage() {
               )}
             </div>
           )}
+          {isLeadPlanning && teamLead && (intake.status === "approved" || intake.status === "awaiting_plan_approval") && intake.implementationPlan && (
+            <div className="mt-4 space-y-4 border-t pt-4">
+              {createdTasks.length > 0 && (
+                <div className="rounded-md border bg-muted/40 p-3 text-sm">
+                  <p className="font-medium flex items-center gap-2">
+                    <ListTodo className="h-4 w-4" /> Jira subtasks created ({createdTasks.length})
+                  </p>
+                  <ul className="mt-2 space-y-1 text-xs">
+                    {createdTasks.map((t) => (
+                      <li key={t.key}>
+                        <span className="font-mono">{t.key}</span> — {t.summary}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => createJiraTasks.mutate()}
+                  disabled={createJiraTasks.isPending || handoffSubtasks.isPending}
+                  className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
+                >
+                  <ListTodo className="h-4 w-4" />
+                  {createJiraTasks.isPending ? "Creating subtasks…" : createdTasks.length ? "Recreate Jira subtasks" : "Create Jira subtasks"}
+                </button>
+                {createdTasks.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => handoffSubtasks.mutate()}
+                    disabled={handoffSubtasks.isPending || createJiraTasks.isPending}
+                    className="inline-flex items-center gap-2 rounded-md border border-primary px-4 py-2 text-sm font-medium text-primary"
+                  >
+                    <Users className="h-4 w-4" />
+                    {handoffSubtasks.isPending ? "Handing off…" : "Hand off to team"}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
         </section>
       )}
 
       {/* IMPLEMENT / PR */}
-      {(currentStep === "implement" ||
+      {!isLeadPlanning && (currentStep === "implement" ||
         intake.status === "implementing" ||
         intake.status === "implementation_failed" ||
         intake.status === "awaiting_pr_review" ||
