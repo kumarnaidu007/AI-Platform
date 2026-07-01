@@ -195,3 +195,55 @@ Reply helpfully in plain text (2-4 sentences). If they request a spec change, de
     result = complete_json(db, system=SYSTEM, user=f'Return JSON: {{"reply": "your message"}}')
     data = result.parsed_json or {}
     return str(data.get("reply") or result.content[:500])
+
+
+def generate_jira_task_breakdown(
+    db: Session,
+    *,
+    epic_key: str,
+    epic_summary: str,
+    epic_description: str,
+    documents: dict[str, dict],
+    implementation_plan: dict | None = None,
+    team_member_names: list[str] | None = None,
+) -> dict[str, Any]:
+    """Team lead: break epic into Jira stories/subtasks with assignee hints."""
+    prompt = f"""Break Jira epic {epic_key} into implementable subtasks for a development team.
+
+Epic summary: {epic_summary}
+Epic description: {epic_description[:4000]}
+
+Locked specifications:
+{json.dumps(documents, indent=2)[:10000]}
+
+Implementation plan (if any):
+{json.dumps(implementation_plan or {}, indent=2)[:6000]}
+
+Team members available for assignment: {team_member_names or ["unassigned"]}
+
+Return JSON:
+{{
+  "summary": "one-line epic breakdown strategy",
+  "tasks": [
+    {{
+      "title": "Short Jira summary",
+      "description": "What to implement, acceptance criteria, links to API/UI sections",
+      "issue_type": "Sub-task",
+      "priority": "Medium",
+      "suggested_assignee_name": "exact name from team list or null",
+      "depends_on": ["optional other task titles"],
+      "estimated_points": 3
+    }}
+  ]
+}}
+
+Rules:
+- Produce 4-12 subtasks covering the full epic scope
+- Each subtask must be independently implementable by one developer with AI agents
+- Reference specific API routes, files, or screens from the specs when possible
+- Order tasks so backend/API work comes before dependent UI tasks"""
+    result = complete_json(db, system=SYSTEM, user=prompt)
+    data = result.parsed_json or {}
+    if not data.get("tasks"):
+        data["tasks"] = []
+    return data
