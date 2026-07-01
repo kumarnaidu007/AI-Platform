@@ -160,7 +160,18 @@ def _apply_schema_patches(db: Session) -> None:
     _apply_requirements_schema(db)
     _apply_encrypted_config_text(db)
     _apply_pending_publish_schema(db)
+    _apply_jira_team_workflow_schema(db)
     db.commit()
+
+
+def _apply_jira_team_workflow_schema(db: Session) -> None:
+    from pathlib import Path
+
+    from sqlalchemy import text
+
+    path = Path(__file__).resolve().parent / "migrations" / "18_jira_team_workflow.sql"
+    if path.exists():
+        db.execute(text(path.read_text(encoding="utf-8")))
 
 
 def _apply_pending_publish_schema(db: Session) -> None:
