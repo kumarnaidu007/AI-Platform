@@ -133,7 +133,7 @@ export function IntegrationConnectPage() {
                 placeholder={field.type === "secret" ? "••••••••••••" : field.default?.toString()}
                 defaultValue={
                   field.type !== "secret"
-                    ? (integration.configMetadata[field.key]?.toString() ?? field.default?.toString())
+                    ? (integration.configMetadata?.[field.key]?.toString() ?? field.default?.toString())
                     : undefined
                 }
                 className="h-10 w-full rounded-md border bg-background px-3 pr-10 text-sm"
