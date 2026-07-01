@@ -47,7 +47,7 @@ export function UserDashboardPage() {
               <Ticket className="h-4 w-4" /> Jira requirements portal
             </p>
             <p className="mt-1 text-sm text-muted-foreground">
-              Pick a ticket, answer clarification questions, review separate specs, approve the plan, then implement.
+              Pick a ticket or open an assigned subtask from your team lead, then start implementation when the plan is ready.
             </p>
           </div>
           <Link
