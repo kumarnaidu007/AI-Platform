@@ -405,6 +405,152 @@ def add_issue_comment(token: str, cloud_id: str, issue_key: str, body: str) -> d
     return _request("POST", url, token, json={"body": _adf_paragraph(body)})
 
 
+def get_issue_transitions(token: str, cloud_id: str, issue_key: str) -> list[dict[str, Any]]:
+    url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}/transitions"
+    data = _request("GET", url, token, params={"expand": "transitions.fields"})
+    return data.get("transitions") or []
+
+
+def transition_issue(token: str, cloud_id: str, issue_key: str, transition_id: str) -> None:
+    url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}/transitions"
+    _request("POST", url, token, json={"transition": {"id": transition_id}})
+
+
+def transition_issue_by_names(
+    token: str,
+    cloud_id: str,
+    issue_key: str,
+    target_names: tuple[str, ...],
+) -> bool:
+    """Transition issue using the first available transition whose name matches (case-insensitive)."""
+    transitions = get_issue_transitions(token, cloud_id, issue_key)
+    targets = {n.lower() for n in target_names}
+    for tr in transitions:
+        name = str(tr.get("name") or "").lower()
+        to_status = str((tr.get("to") or {}).get("name") or "").lower()
+        if name in targets or to_status in targets:
+            transition_issue(token, cloud_id, issue_key, str(tr["id"]))
+            return True
+    logger = __import__("logging").getLogger(__name__)
+    logger.info(
+        "No matching Jira transition for %s (wanted one of %s); available: %s",
+        issue_key,
+        target_names,
+        [t.get("name") for t in transitions],
+    )
+    return False
+
+
+def assign_issue(token: str, cloud_id: str, issue_key: str, account_id: str) -> None:
+    url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue/{issue_key}/assignee"
+    _request("PUT", url, token, json={"accountId": account_id})
+
+
+def create_issue(
+    token: str,
+    cloud_id: str,
+    *,
+    project_key: str,
+    summary: str,
+    description: str = "",
+    issue_type: str = "Task",
+    parent_key: str | None = None,
+    assignee_account_id: str | None = None,
+    labels: list[str] | None = None,
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "project": {"key": project_key},
+        "summary": summary[:255],
+        "issuetype": {"name": issue_type},
+    }
+    if description:
+        fields["description"] = _adf_paragraph(description)
+    if parent_key:
+        fields["parent"] = {"key": parent_key}
+    if assignee_account_id:
+        fields["assignee"] = {"accountId": assignee_account_id}
+    if labels:
+        fields["labels"] = labels[:10]
+
+    url = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/issue"
+    result = _request("POST", url, token, json={"fields": fields})
+    issue_key = result.get("key")
+    issue_id = result.get("id")
+    return {"key": issue_key, "id": issue_id}
+
+
+def create_subtask(
+    token: str,
+    cloud_id: str,
+    *,
+    project_key: str,
+    parent_key: str,
+    summary: str,
+    description: str = "",
+    assignee_account_id: str | None = None,
+) -> dict[str, Any]:
+    """Create a sub-task under a parent issue (Jira Cloud)."""
+    for issue_type in ("Sub-task", "Subtask", "Sub task"):
+        try:
+            return create_issue(
+                token,
+                cloud_id,
+                project_key=project_key,
+                summary=summary,
+                description=description,
+                issue_type=issue_type,
+                parent_key=parent_key,
+                assignee_account_id=assignee_account_id,
+                labels=["ai-platform"],
+            )
+        except JiraError as exc:
+            if exc.status_code == 400:
+                continue
+            raise
+    return create_issue(
+        token,
+        cloud_id,
+        project_key=project_key,
+        summary=summary,
+        description=description,
+        issue_type="Task",
+        parent_key=parent_key,
+        assignee_account_id=assignee_account_id,
+        labels=["ai-platform"],
+    )
+
+
+def get_member_jira_account_id(db: Session, workspace_id, user_id) -> str | None:
+    conn = get_jira_connection(db, workspace_id, user_id)
+    if not conn or not conn.config_metadata_json:
+        return None
+    return conn.config_metadata_json.get("jira_account_id")
+
+
+def search_team_issues(
+    token: str,
+    cloud_id: str,
+    *,
+    project_key: str | None = None,
+    max_results: int = 50,
+    site_url: str | None = None,
+    team_lead: bool = False,
+) -> list[dict[str, Any]]:
+    """Team lead sees project backlog; members see their assigned issues."""
+    if team_lead and project_key:
+        jql = f'project = "{project_key}" AND statusCategory != Done ORDER BY updated DESC'
+    elif team_lead:
+        jql = "statusCategory != Done ORDER BY updated DESC"
+    elif project_key:
+        jql = (
+            f'project = "{project_key}" AND assignee = currentUser() '
+            f'AND statusCategory != Done ORDER BY updated DESC'
+        )
+    else:
+        jql = "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
+    return search_issues(token, cloud_id, jql=jql, max_results=max_results, site_url=site_url)
+
+
 def add_issue_remote_link(
     token: str,
     cloud_id: str,
