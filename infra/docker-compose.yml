@@ -64,6 +64,16 @@ services:
       redis:
         condition: service_started
 
+  web:
+    build:
+      context: ../apps/web
+      dockerfile: Dockerfile
+    container_name: ai-dev-platform-web
+    ports:
+      - "5180:80"
+    depends_on:
+      - api
+
 volumes:
   postgres_data:
   redis_data:
