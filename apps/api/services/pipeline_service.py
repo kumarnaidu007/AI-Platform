@@ -349,6 +349,12 @@ def _sync_intake_after_pipeline(
             intake_row.pending_publish_json = ctx.pending_publish
             intake_row.feature_branch = ctx.pending_publish.get("branch_name")
             intake_row.base_branch = ctx.pending_publish.get("base_branch")
+        try:
+            from services.jira_sync_service import on_implementation_ready_for_review
+
+            on_implementation_ready_for_review(db, intake_row)
+        except Exception:
+            pass
         notify_user(
             db,
             workspace_id=intake_row.workspace_id,
@@ -361,6 +367,12 @@ def _sync_intake_after_pipeline(
         )
     elif not success:
         intake_row.status = "implementation_failed"
+        try:
+            from services.jira_sync_service import on_implementation_failed
+
+            on_implementation_failed(db, intake_row, error_message=error_message)
+        except Exception:
+            pass
         notify_user(
             db,
             workspace_id=intake_row.workspace_id,
