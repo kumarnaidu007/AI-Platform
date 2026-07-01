@@ -6,6 +6,8 @@ import { jiraApi } from "@/services/jiraApi";
 import { intakeApi } from "@/services/intakeApi";
 import { companyApi } from "@/services/companyApi";
 import { getApiErrorMessage } from "@/services/authApi";
+import { useAuth } from "@/context/AuthContext";
+import { isTeamLead } from "@/types/roles";
 import { cn } from "@/lib/utils";
 
 const INTAKE_STATUS_LABEL: Record<string, string> = {
@@ -27,6 +29,8 @@ const INTAKE_STATUS_LABEL: Record<string, string> = {
 export function CompanyJiraPortalPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { company } = useAuth();
+  const teamLead = isTeamLead(company?.role);
   const [projectKey, setProjectKey] = useState("");
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -54,6 +58,20 @@ export function CompanyJiraPortalPage() {
     onError: (err: unknown) => setError(getApiErrorMessage(err, "Failed to start intake")),
   });
 
+  const planEpic = useMutation({
+    mutationFn: (issueKey: string) =>
+      intakeApi.planEpic({
+        jiraIssueKey: issueKey,
+        projectId: selectedProjectId || undefined,
+      }),
+    onSuccess: (intake) => {
+      setError(null);
+      queryClient.invalidateQueries({ queryKey: ["jira-portal"] });
+      navigate(`/workspace/jira/${intake.jiraIssueKey}`);
+    },
+    onError: (err: unknown) => setError(getApiErrorMessage(err, "Failed to start epic planning")),
+  });
+
   const connected = jiraStatus.data?.isConnected === true;
 
   return (
@@ -61,7 +79,9 @@ export function CompanyJiraPortalPage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Jira Portal</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Each ticket gets its own clarification flow — questions, separate specs, your confirmation, then implementation.
+          {teamLead
+            ? "As team lead: plan epics with AI, create Jira subtasks, and hand off to members. Members implement assigned subtasks."
+            : "Each ticket gets its own clarification flow — questions, separate specs, your confirmation, then implementation."}
         </p>
       </div>
 
@@ -121,7 +141,7 @@ export function CompanyJiraPortalPage() {
 
       <div className="rounded-lg border bg-card">
         <div className="border-b px-4 py-3">
-          <h2 className="text-sm font-semibold">Your Jira tickets</h2>
+          <h2 className="text-sm font-semibold">{teamLead ? "Jira tickets (team backlog)" : "Your Jira tickets"}</h2>
         </div>
         {portal.isLoading ? (
           <div className="flex items-center gap-2 p-8 text-sm text-muted-foreground">
@@ -177,17 +197,30 @@ export function CompanyJiraPortalPage() {
                       Continue
                     </Link>
                   ) : (
-                    <button
-                      type="button"
-                      disabled={startIntake.isPending || !selectedProjectId}
-                      title={!selectedProjectId ? "Select a platform project first" : undefined}
-                      onClick={() => issue.key && startIntake.mutate(issue.key)}
-                      className={cn(
-                        "rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
+                    <>
+                      {teamLead && (
+                        <button
+                          type="button"
+                          disabled={planEpic.isPending || !selectedProjectId}
+                          title={!selectedProjectId ? "Select a platform project first" : undefined}
+                          onClick={() => issue.key && planEpic.mutate(issue.key)}
+                          className="rounded-md border border-primary px-3 py-1.5 text-xs font-medium text-primary"
+                        >
+                          Plan epic
+                        </button>
                       )}
-                    >
-                      Start clarification
-                    </button>
+                      <button
+                        type="button"
+                        disabled={startIntake.isPending || !selectedProjectId}
+                        title={!selectedProjectId ? "Select a platform project first" : undefined}
+                        onClick={() => issue.key && startIntake.mutate(issue.key)}
+                        className={cn(
+                          "rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
+                        )}
+                      >
+                        Start clarification
+                      </button>
+                    </>
                   )}
                 </div>
               </div>
