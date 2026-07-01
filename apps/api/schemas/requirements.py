@@ -7,6 +7,20 @@ from pydantic import BaseModel, Field
 class IntakeCreateRequest(BaseModel):
     jira_issue_key: str = Field(..., min_length=3, max_length=32)
     project_id: UUID | None = None
+    lead_planning: bool = False
+
+
+class LeadPlanEpicRequest(BaseModel):
+    jira_issue_key: str = Field(..., min_length=3, max_length=32)
+    project_id: UUID | None = None
+
+
+class AssignIntakeRequest(BaseModel):
+    assignee_user_id: UUID
+
+
+class HandoffSubtasksRequest(BaseModel):
+    comment: str | None = None
 
 
 class AnswerQuestionRequest(BaseModel):
@@ -122,6 +136,11 @@ class IntakeSummaryResponse(BaseModel):
     updated_at: datetime
     questions_total: int = 0
     questions_answered: int = 0
+    intake_mode: str = "member"
+    parent_jira_key: str | None = None
+    planner_user_id: UUID | None = None
+    assignee_user_id: UUID | None = None
+    jira_project_key: str | None = None
 
 
 class IntakeDetailResponse(IntakeSummaryResponse):
@@ -131,6 +150,27 @@ class IntakeDetailResponse(IntakeSummaryResponse):
     approvals: list[IntakeApprovalResponse] = Field(default_factory=list)
     implementation_plan: dict | None = None
     pending_changes: PendingChangesResponse | None = None
+    jira_tasks: dict | None = None
+
+
+class EpicProgressSubtaskResponse(BaseModel):
+    intake_id: UUID | None = None
+    jira_issue_key: str
+    jira_summary: str | None = None
+    status: str
+    assignee_user_id: UUID | None = None
+    jira_status: str | None = None
+    pr_url: str | None = None
+
+
+class EpicProgressResponse(BaseModel):
+    parent_jira_key: str
+    parent_intake_id: UUID | None = None
+    parent_status: str | None = None
+    total_subtasks: int = 0
+    completed_subtasks: int = 0
+    status_counts: dict[str, int] = Field(default_factory=dict)
+    subtasks: list[EpicProgressSubtaskResponse] = Field(default_factory=list)
 
 
 class JiraPortalIssueResponse(BaseModel):
