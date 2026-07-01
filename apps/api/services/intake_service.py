@@ -13,9 +13,10 @@ from agents.requirements_agents import (
     generate_clarification_questions,
     generate_domain_documents,
     generate_implementation_plan,
+    generate_jira_task_breakdown,
     review_spec_consistency,
 )
-from models import Project, Workspace
+from models import Project, User, Workspace, WorkspaceMember
 from models.requirements import (
     ClarificationAnswer,
     ClarificationQuestion,
@@ -25,8 +26,21 @@ from models.requirements import (
     RequirementDocument,
 )
 from services.github_service import get_github_access_token, get_github_connection, list_repo_source_files
-from services.jira_service import get_issue, JiraError
+from services.jira_service import (
+    JiraError,
+    call_with_jira_tokens,
+    create_subtask,
+    get_issue,
+    get_jira_connection,
+    get_member_jira_account_id,
+)
+from services.jira_sync_service import (
+    on_implementation_started,
+    on_pr_completed,
+    refresh_intake_jira_status,
+)
 from services.notification_service import notify_user
+from services.intake_permissions import effective_assignee_id
 from services.pipeline_service import start_pipeline_run
 
 
@@ -85,6 +99,8 @@ def create_or_get_intake(
         existing.jira_status = issue_row.get("status")
         existing.jira_url = issue_row.get("url")
         existing.jira_issue_id = issue_row.get("id")
+        if issue_row.get("project_key"):
+            existing.jira_project_key = issue_row.get("project_key")
         if project_id:
             existing.project_id = project_id
         db.commit()
@@ -108,6 +124,7 @@ def create_or_get_intake(
         jira_summary=issue_row.get("summary"),
         jira_status=issue_row.get("status"),
         jira_url=issue_row.get("url"),
+        jira_project_key=issue_row.get("project_key"),
         status="synced",
         repo_url=repo_url,
         base_branch=base_branch,
@@ -620,14 +637,20 @@ def start_implementation(
     db.commit()
     db.refresh(intake)
 
+    try:
+        on_implementation_started(db, intake)
+    except Exception:
+        pass
+
+    notify_target = effective_assignee_id(intake)
     notify_user(
         db,
         workspace_id=intake.workspace_id,
-        user_id=intake.user_id,
+        user_id=notify_target,
         notification_type="implementation_started",
         title=f"{intake.jira_issue_key}: implementation started",
         body="Pipeline is running. You will be notified when code is ready for your review.",
-        link_path=f"/workspace/projects/{intake.project_id}",
+        link_path=f"/workspace/jira/{intake.jira_issue_key}",
         intake_id=intake.id,
     )
     return intake
@@ -737,6 +760,14 @@ def approve_pr_review(
     db.commit()
     db.refresh(intake)
 
+    try:
+        on_pr_completed(db, intake, pr_url=str(pr_data.get("url")), merged=merged)
+        from services.jira_sync_service import maybe_refresh_parent_epic
+
+        maybe_refresh_parent_epic(db, intake)
+    except Exception:
+        pass
+
     body_parts = [f"PR created: {pr_data.get('url')}"]
     if merged:
         body_parts.append("Pull request merged.")
@@ -781,3 +812,340 @@ def fetch_jira_issue_for_user(db: Session, workspace_id: UUID, user_id: UUID, is
         conn,
         lambda t: get_issue(t["access_token"], t["cloud_id"], issue_key.upper(), site_url=site_url),
     )
+
+
+def _workspace_member_directory(db: Session, workspace_id: UUID) -> list[dict]:
+    rows = (
+        db.query(WorkspaceMember, User)
+        .join(User, User.id == WorkspaceMember.user_id)
+        .filter(WorkspaceMember.workspace_id == workspace_id)
+        .all()
+    )
+    out: list[dict] = []
+    for member, user in rows:
+        jira_name = None
+        conn = get_jira_connection(db, workspace_id, user.id)
+        if conn and conn.config_metadata_json:
+            jira_name = conn.config_metadata_json.get("jira_display_name")
+        out.append(
+            {
+                "user_id": user.id,
+                "full_name": user.full_name or user.email,
+                "email": user.email,
+                "role": member.role,
+                "jira_display_name": jira_name,
+                "jira_account_id": get_member_jira_account_id(db, workspace_id, user.id),
+            }
+        )
+    return out
+
+
+def _match_assignee_user_id(directory: list[dict], suggested_name: str | None) -> UUID | None:
+    if not suggested_name:
+        return None
+    needle = suggested_name.strip().lower()
+    for row in directory:
+        for field in ("full_name", "jira_display_name", "email"):
+            val = row.get(field)
+            if val and needle in str(val).lower():
+                return row["user_id"]
+    return None
+
+
+def create_lead_planning_intake(
+    db: Session,
+    *,
+    workspace_id: UUID,
+    planner_user_id: UUID,
+    jira_issue_key: str,
+    project_id: UUID | None,
+    issue_row: dict,
+) -> JiraTicketIntake:
+    """Team lead starts planning on an epic/story — no implementation on this intake."""
+    key = jira_issue_key.strip().upper()
+    existing = get_intake_by_key(db, workspace_id, key)
+    if existing:
+        if existing.intake_mode != "lead_planning":
+            existing.intake_mode = "lead_planning"
+            existing.planner_user_id = planner_user_id
+            db.commit()
+            db.refresh(existing)
+        return existing
+
+    repo_url = None
+    base_branch = "main"
+    if project_id:
+        project = db.query(Project).filter(Project.id == project_id, Project.workspace_id == workspace_id).first()
+        if project:
+            repo_url = project.repo_url
+
+    intake = JiraTicketIntake(
+        workspace_id=workspace_id,
+        user_id=planner_user_id,
+        planner_user_id=planner_user_id,
+        project_id=project_id,
+        jira_issue_key=key,
+        jira_issue_id=issue_row.get("id"),
+        jira_summary=issue_row.get("summary"),
+        jira_status=issue_row.get("status"),
+        jira_url=issue_row.get("url"),
+        jira_project_key=issue_row.get("project_key"),
+        status="synced",
+        repo_url=repo_url,
+        base_branch=base_branch,
+        intake_mode="lead_planning",
+    )
+    db.add(intake)
+    db.commit()
+    db.refresh(intake)
+    return intake
+
+
+def create_jira_subtasks_from_plan(
+    db: Session,
+    intake: JiraTicketIntake,
+    planner_user_id: UUID,
+) -> JiraTicketIntake:
+    if intake.intake_mode != "lead_planning":
+        raise ValueError("Jira task creation is only for lead planning intakes")
+    if intake.status not in ("awaiting_plan_approval", "approved", "locked"):
+        raise ValueError("Lock requirements and generate a plan before creating Jira subtasks")
+
+    documents = {
+        d.doc_type: d.content_json
+        for d in db.query(RequirementDocument).filter(RequirementDocument.intake_id == intake.id).all()
+    }
+    directory = _workspace_member_directory(db, intake.workspace_id)
+    breakdown = generate_jira_task_breakdown(
+        db,
+        epic_key=intake.jira_issue_key,
+        epic_summary=intake.jira_summary or "",
+        epic_description="",
+        documents=documents,
+        implementation_plan=intake.implementation_plan_json,
+        team_member_names=[r["full_name"] for r in directory if r["role"] != "team_lead"],
+    )
+
+    conn = get_jira_connection(db, intake.workspace_id, planner_user_id)
+    if not conn:
+        raise JiraError("Jira not connected for team lead")
+    project_key = intake.jira_project_key or intake.jira_issue_key.split("-")[0]
+    metadata = conn.config_metadata_json or {}
+    site_url = metadata.get("jira_site_url")
+
+    created_tasks: list[dict] = []
+
+    def _create_all(tokens: dict[str, str]) -> list[dict]:
+        token = tokens["access_token"]
+        cloud_id = tokens["cloud_id"]
+        results: list[dict] = []
+        for task in breakdown.get("tasks") or []:
+            title = str(task.get("title") or "Subtask").strip()
+            if not title:
+                continue
+            assignee_id = _match_assignee_user_id(directory, task.get("suggested_assignee_name"))
+            account_id = None
+            if assignee_id:
+                account_id = get_member_jira_account_id(db, intake.workspace_id, assignee_id)
+            desc = str(task.get("description") or "")
+            row = create_subtask(
+                token,
+                cloud_id,
+                project_key=project_key,
+                parent_key=intake.jira_issue_key,
+                summary=title,
+                description=desc,
+                assignee_account_id=account_id,
+            )
+            issue = get_issue(token, cloud_id, row["key"], site_url=site_url)
+            results.append(
+                {
+                    "key": row["key"],
+                    "id": row.get("id"),
+                    "summary": title,
+                    "description": desc,
+                    "assignee_user_id": str(assignee_id) if assignee_id else None,
+                    "url": issue.get("url"),
+                    "status": issue.get("status"),
+                }
+            )
+        return results
+
+    created_tasks = call_with_jira_tokens(db, conn, _create_all)
+    intake.jira_tasks_json = {"breakdown": breakdown, "created": created_tasks}
+    if intake.status == "awaiting_plan_approval":
+        intake.status = "approved"
+    db.commit()
+    db.refresh(intake)
+    return intake
+
+
+def handoff_subtasks_to_members(
+    db: Session,
+    intake: JiraTicketIntake,
+    planner_user_id: UUID,
+) -> list[JiraTicketIntake]:
+    """Create member intakes for each Jira subtask and notify assignees."""
+    if intake.intake_mode != "lead_planning":
+        raise ValueError("Handoff is only for lead planning intakes")
+    tasks = (intake.jira_tasks_json or {}).get("created") or []
+    if not tasks:
+        raise ValueError("Create Jira subtasks first")
+
+    parent_docs = db.query(RequirementDocument).filter(RequirementDocument.intake_id == intake.id).all()
+    parent_plan = intake.implementation_plan_json
+    member_intakes: list[JiraTicketIntake] = []
+
+    for task in tasks:
+        key = str(task.get("key") or "").upper()
+        if not key:
+            continue
+        assignee_raw = task.get("assignee_user_id")
+        assignee_id = UUID(str(assignee_raw)) if assignee_raw else None
+        if not assignee_id:
+            continue
+
+        issue_row = {
+            "id": task.get("id"),
+            "key": key,
+            "summary": task.get("summary"),
+            "status": task.get("status"),
+            "url": task.get("url"),
+            "project_key": intake.jira_project_key,
+        }
+        child = get_intake_by_key(db, intake.workspace_id, key)
+        if not child:
+            child = JiraTicketIntake(
+                workspace_id=intake.workspace_id,
+                user_id=assignee_id,
+                assignee_user_id=assignee_id,
+                planner_user_id=planner_user_id,
+                project_id=intake.project_id,
+                jira_issue_key=key,
+                jira_issue_id=issue_row.get("id"),
+                jira_summary=issue_row.get("summary"),
+                jira_status=issue_row.get("status"),
+                jira_url=issue_row.get("url"),
+                jira_project_key=intake.jira_project_key,
+                parent_jira_key=intake.jira_issue_key,
+                status="approved",
+                repo_url=intake.repo_url,
+                base_branch=intake.base_branch,
+                intake_mode="member",
+                implementation_plan_json=parent_plan,
+            )
+            db.add(child)
+            db.flush()
+            for doc in parent_docs:
+                db.add(
+                    RequirementDocument(
+                        intake_id=child.id,
+                        doc_type=doc.doc_type,
+                        title=f"{doc.title} (from {intake.jira_issue_key})",
+                        content_json=doc.content_json,
+                        version=doc.version,
+                        status="confirmed",
+                    )
+                )
+        else:
+            child.assignee_user_id = assignee_id
+            child.parent_jira_key = intake.jira_issue_key
+            child.implementation_plan_json = parent_plan
+            child.status = "approved"
+        member_intakes.append(child)
+
+        notify_user(
+            db,
+            workspace_id=intake.workspace_id,
+            user_id=assignee_id,
+            notification_type="task_assigned",
+            title=f"{key}: ready to implement",
+            body=f"Your team lead assigned subtask from {intake.jira_issue_key}. Review the plan and start implementation.",
+            link_path=f"/workspace/jira/{key}",
+            intake_id=child.id,
+        )
+
+    db.commit()
+    for child in member_intakes:
+        db.refresh(child)
+
+    from services.jira_sync_service import on_plan_handoff
+
+    try:
+        on_plan_handoff(db, intake, subtask_keys=[t["key"] for t in tasks if t.get("key")])
+    except Exception:
+        pass
+
+    return member_intakes
+
+
+def epic_progress(db: Session, workspace_id: UUID, parent_jira_key: str) -> dict:
+    parent_key = parent_jira_key.strip().upper()
+    parent = get_intake_by_key(db, workspace_id, parent_key)
+    children = (
+        db.query(JiraTicketIntake)
+        .filter(
+            JiraTicketIntake.workspace_id == workspace_id,
+            JiraTicketIntake.parent_jira_key == parent_key,
+        )
+        .order_by(JiraTicketIntake.jira_issue_key.asc())
+        .all()
+    )
+    jira_created = (parent.jira_tasks_json or {}).get("created") if parent else []
+
+    status_counts: dict[str, int] = {}
+    items = []
+    for child in children:
+        status_counts[child.status] = status_counts.get(child.status, 0) + 1
+        items.append(
+            {
+                "intake_id": str(child.id),
+                "jira_issue_key": child.jira_issue_key,
+                "jira_summary": child.jira_summary,
+                "status": child.status,
+                "assignee_user_id": str(child.assignee_user_id) if child.assignee_user_id else None,
+                "jira_status": child.jira_status,
+                "pr_url": child.pr_url,
+            }
+        )
+
+    for task in jira_created:
+        key = str(task.get("key") or "").upper()
+        if key and not any(i["jira_issue_key"] == key for i in items):
+            items.append(
+                {
+                    "intake_id": None,
+                    "jira_issue_key": key,
+                    "jira_summary": task.get("summary"),
+                    "status": "not_started",
+                    "assignee_user_id": task.get("assignee_user_id"),
+                    "jira_status": task.get("status"),
+                    "pr_url": None,
+                }
+            )
+
+    total = len(items) or len(jira_created)
+    completed = sum(1 for i in items if i["status"] == "completed")
+    return {
+        "parent_jira_key": parent_key,
+        "parent_intake_id": str(parent.id) if parent else None,
+        "parent_status": parent.status if parent else None,
+        "total_subtasks": total,
+        "completed_subtasks": completed,
+        "status_counts": status_counts,
+        "subtasks": items,
+    }
+
+
+def refresh_intake_from_jira(db: Session, intake: JiraTicketIntake, user_id: UUID) -> JiraTicketIntake:
+    status = refresh_intake_jira_status(
+        db,
+        workspace_id=intake.workspace_id,
+        user_id=user_id,
+        issue_key=intake.jira_issue_key,
+    )
+    if status:
+        intake.jira_status = status
+        db.commit()
+        db.refresh(intake)
+    return intake
