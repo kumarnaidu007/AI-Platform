@@ -108,12 +108,36 @@ export interface IntakeDetail {
   updatedAt: string;
   questionsTotal: number;
   questionsAnswered: number;
+  intakeMode: string;
+  parentJiraKey: string | null;
+  plannerUserId: string | null;
+  assigneeUserId: string | null;
+  jiraProjectKey: string | null;
   questions: ClarificationQuestion[];
   documents: RequirementDocument[];
   conversations: ConversationMessage[];
   approvals: IntakeApproval[];
   implementationPlan: Record<string, unknown> | null;
   pendingChanges: PendingChanges | null;
+  jiraTasks: Record<string, unknown> | null;
+}
+
+export interface EpicProgress {
+  parentJiraKey: string;
+  parentIntakeId: string | null;
+  parentStatus: string | null;
+  totalSubtasks: number;
+  completedSubtasks: number;
+  statusCounts: Record<string, number>;
+  subtasks: {
+    intakeId: string | null;
+    jiraIssueKey: string;
+    jiraSummary: string | null;
+    status: string;
+    assigneeUserId: string | null;
+    jiraStatus: string | null;
+    prUrl: string | null;
+  }[];
 }
 
 function mapPortalIssue(row: Record<string, unknown>): PortalIssue {
@@ -190,6 +214,11 @@ function mapIntake(row: Record<string, unknown>): IntakeDetail {
     updatedAt: String(row.updated_at),
     questionsTotal: Number(row.questions_total ?? 0),
     questionsAnswered: Number(row.questions_answered ?? 0),
+    intakeMode: String(row.intake_mode ?? "member"),
+    parentJiraKey: row.parent_jira_key != null ? String(row.parent_jira_key) : null,
+    plannerUserId: row.planner_user_id != null ? String(row.planner_user_id) : null,
+    assigneeUserId: row.assignee_user_id != null ? String(row.assignee_user_id) : null,
+    jiraProjectKey: row.jira_project_key != null ? String(row.jira_project_key) : null,
     questions: ((row.questions as Record<string, unknown>[]) ?? []).map(mapQuestion),
     documents: ((row.documents as Record<string, unknown>[]) ?? []).map(mapDocument),
     conversations: ((row.conversations as Record<string, unknown>[]) ?? []).map((c) => ({
@@ -210,6 +239,7 @@ function mapIntake(row: Record<string, unknown>): IntakeDetail {
     })),
     implementationPlan: (row.implementation_plan as Record<string, unknown>) ?? null,
     pendingChanges: mapPendingChanges(row.pending_changes),
+    jiraTasks: (row.jira_tasks as Record<string, unknown>) ?? null,
   };
 }
 
@@ -242,11 +272,56 @@ export const intakeApi = {
     return data.map(mapPortalIssue);
   },
 
-  createIntake: async (payload: { jiraIssueKey: string; projectId?: string }) => {
+  createIntake: async (payload: { jiraIssueKey: string; projectId?: string; leadPlanning?: boolean }) => {
     const { data } = await api.post<Record<string, unknown>>("/api/workspace/intakes", {
       jira_issue_key: payload.jiraIssueKey,
       project_id: payload.projectId,
+      lead_planning: payload.leadPlanning ?? false,
     });
+    return mapIntake(data);
+  },
+
+  planEpic: async (payload: { jiraIssueKey: string; projectId?: string }) => {
+    const { data } = await api.post<Record<string, unknown>>("/api/workspace/intakes/plan-epic", {
+      jira_issue_key: payload.jiraIssueKey,
+      project_id: payload.projectId,
+    });
+    return mapIntake(data);
+  },
+
+  getEpicProgress: async (parentKey: string) => {
+    const { data } = await api.get<Record<string, unknown>>(`/api/workspace/intakes/epic/${parentKey}/progress`);
+    return {
+      parentJiraKey: String(data.parent_jira_key),
+      parentIntakeId: data.parent_intake_id != null ? String(data.parent_intake_id) : null,
+      parentStatus: data.parent_status != null ? String(data.parent_status) : null,
+      totalSubtasks: Number(data.total_subtasks ?? 0),
+      completedSubtasks: Number(data.completed_subtasks ?? 0),
+      statusCounts: (data.status_counts as Record<string, number>) ?? {},
+      subtasks: ((data.subtasks as Record<string, unknown>[]) ?? []).map((s) => ({
+        intakeId: s.intake_id != null ? String(s.intake_id) : null,
+        jiraIssueKey: String(s.jira_issue_key),
+        jiraSummary: s.jira_summary != null ? String(s.jira_summary) : null,
+        status: String(s.status),
+        assigneeUserId: s.assignee_user_id != null ? String(s.assignee_user_id) : null,
+        jiraStatus: s.jira_status != null ? String(s.jira_status) : null,
+        prUrl: s.pr_url != null ? String(s.pr_url) : null,
+      })),
+    } satisfies EpicProgress;
+  },
+
+  createJiraTasks: async (intakeId: string) => {
+    const { data } = await api.post<Record<string, unknown>>(`/api/workspace/intakes/${intakeId}/create-jira-tasks`);
+    return mapIntake(data);
+  },
+
+  handoffSubtasks: async (intakeId: string) => {
+    const { data } = await api.post<Record<string, unknown>[]>(`/api/workspace/intakes/${intakeId}/handoff`);
+    return data;
+  },
+
+  refreshJira: async (intakeId: string) => {
+    const { data } = await api.post<Record<string, unknown>>(`/api/workspace/intakes/${intakeId}/refresh-jira`);
     return mapIntake(data);
   },
 
