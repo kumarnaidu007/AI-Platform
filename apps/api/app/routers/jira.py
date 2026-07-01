@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from app.deps import DbDep, WorkspaceAuthDep, WorkspaceWriterDep
+from constants.roles import TEAM_LEAD
 from config import settings
 from services.jira_service import (
     JiraError,
@@ -12,6 +13,7 @@ from services.jira_service import (
     get_platform_jira_config,
     list_projects,
     search_issues,
+    search_team_issues,
     start_jira_oauth,
     test_jira_token,
     user_has_jira_assigned,
@@ -203,16 +205,18 @@ def jira_portal(
     max_results: int = Query(50, ge=1, le=100),
 ):
     conn, _, site_url = _jira_tokens_or_400(db, ctx)
+    lead = ctx.member_role == TEAM_LEAD
     try:
         rows = call_with_jira_tokens(
             db,
             conn,
-            lambda t: search_issues(
+            lambda t: search_team_issues(
                 t["access_token"],
                 t["cloud_id"],
                 project_key=project_key,
                 max_results=max_results,
                 site_url=site_url,
+                team_lead=lead,
             ),
         )
     except JiraError as exc:
