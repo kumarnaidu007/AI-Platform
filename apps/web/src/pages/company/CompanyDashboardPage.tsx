@@ -48,6 +48,17 @@ export function CompanyDashboardPage() {
         <StatCard label="AI services granted" value={data?.servicesEnabled ?? 0} icon={Sparkles} />
         {isAdmin && <StatCard label="Team members" value={data?.teamCount ?? 0} icon={Users} />}
       </div>
+      {isAdmin && (
+        <div className="rounded-lg border border-primary/20 bg-primary/5 p-4">
+          <p className="text-sm font-semibold">Team lead: Jira planning</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Plan epics with AI, create Jira subtasks, and hand off to members from the Jira Portal.
+          </p>
+          <Link to="/workspace/jira" className="mt-2 inline-block text-sm font-medium text-primary hover:underline">
+            Open Jira Portal →
+          </Link>
+        </div>
+      )}
       <div className="rounded-lg border bg-card p-6">
         <h2 className="text-base font-semibold">Getting started</h2>
         <p className="mt-2 text-sm text-muted-foreground">
