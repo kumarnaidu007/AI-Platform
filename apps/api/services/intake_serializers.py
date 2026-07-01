@@ -68,6 +68,11 @@ def intake_to_summary(intake: JiraTicketIntake, stats: dict | None = None) -> In
         updated_at=intake.updated_at,
         questions_total=stats.get("questions_total", 0),
         questions_answered=stats.get("questions_answered", 0),
+        intake_mode=intake.intake_mode or "member",
+        parent_jira_key=intake.parent_jira_key,
+        planner_user_id=intake.planner_user_id,
+        assignee_user_id=intake.assignee_user_id,
+        jira_project_key=intake.jira_project_key,
     )
 
 
@@ -149,4 +154,5 @@ def intake_to_detail(
         ],
         implementation_plan=intake.implementation_plan_json,
         pending_changes=_pending_changes_response(intake.pending_publish_json),
+        jira_tasks=intake.jira_tasks_json,
     )
